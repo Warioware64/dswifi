@@ -289,6 +289,11 @@ typedef enum {
 
 /// Chooses who decides when a client starts the program.
 ///
+/// Call this *after* Wifi_DlPlayStart(), not before: starting a session resets
+/// the mode to WIFI_DLPLAY_BOOT_AUTOMATIC along with the rest of its state, so
+/// a mode chosen beforehand is silently discarded and every console boots the
+/// moment it has the program.
+///
 /// @param mode
 ///     WIFI_DLPLAY_BOOT_AUTOMATIC or WIFI_DLPLAY_BOOT_MANUAL.
 void Wifi_DlPlaySetBootMode(Wifi_DlPlayBootMode mode);

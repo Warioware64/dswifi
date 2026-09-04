@@ -1220,7 +1220,20 @@ static void Wifi_DlPlaySendForState(void)
         // front of it finish -- that is the design, not a fault, and bounding it
         // gave up on consoles that were downloading perfectly. A console that has
         // really gone is caught by the silence above, which is the honest test.
-        if (((client->stage == DLPLAY_PSTATE_SEND_COMPLETE)
+        // Nor while the application is holding a finished console on purpose.
+        // DLPLAY_PSTATE_SEND_COMPLETE is exactly where WIFI_DLPLAY_BOOT_MANUAL
+        // parks a console that has the whole program, and nothing resets
+        // wait_count once it is there, so bounding that stage gave the host
+        // three seconds to call Wifi_DlPlayBootAll() and then destroyed the very
+        // console it was waiting to start. The bound is what automatic mode
+        // wants -- there, a console that keeps asking and is never answered
+        // really has stalled -- so it stays for that mode only. Silence above
+        // remains the honest test in both.
+        bool holding_for_boot = (dlplay_boot_mode == WIFI_DLPLAY_BOOT_MANUAL)
+                                && (client->stage == DLPLAY_PSTATE_SEND_COMPLETE);
+
+        if ((!holding_for_boot
+             && (client->stage == DLPLAY_PSTATE_SEND_COMPLETE)
              && (client->wait_count > DLPLAY_COMPLETE_FRAMES))
             || ((client->stage == DLPLAY_PSTATE_STATION)
                 && (client->wait_count > DLPLAY_STATION_IDLE_FRAMES))
