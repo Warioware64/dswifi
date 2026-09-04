@@ -130,6 +130,36 @@ enum WIFIGETDATA
 ///     It returns true on success, false on failure.
 bool Wifi_InitDefault(unsigned int flags);
 
+/// Says how far the ARM7 got the last time initialization failed.
+///
+/// Wifi_InitDefault() gives the ARM7 a few seconds to report itself ready and
+/// returns false if it never does. The ARM7 runs its own initialization from an
+/// interrupt handler, so a console stopped inside it stops servicing every
+/// other interrupt as well and can't be asked what happened. It leaves a
+/// progress number behind instead, and this returns it.
+///
+/// The numbers are internal to the library and only useful when reporting a
+/// problem, with one exception worth knowing: zero means the ARM7 never started
+/// its initialization at all, which points at the message between the two CPUs
+/// rather than at the WiFi hardware. The value is only meaningful right after
+/// Wifi_InitDefault() has returned false.
+///
+/// @return
+///     The last step the ARM7 reached, or zero if it reached none.
+int Wifi_GetInitFailStage(void);
+
+/// The same number as Wifi_GetInitFailStage(), read through the other view.
+///
+/// The library talks to the ARM7 through an uncached mirror of the struct they
+/// share, so that neither CPU has to manage the cache. Both views are the same
+/// memory and must agree. They are reported separately only when working out
+/// why initialization failed: a difference between them means the mirror isn't
+/// behaving as one, which is a different problem from the ARM7 never starting.
+///
+/// @return
+///     The last step the ARM7 reached, or zero if it reached none.
+int Wifi_GetInitFailStageCached(void);
+
 /// Used to determine if the library has been initialized.
 ///
 /// @return
@@ -536,6 +566,171 @@ void Wifi_MultiplayerHostName(const void *buffer, u8 len);
 /// @return
 ///     0 on success, a negative value on error.
 int Wifi_BeaconStart(const char *ssid, u32 game_id);
+
+/// Contents of the Nintendo vendor information element of beacon frames.
+///
+/// All the fields are copied verbatim to the beacon frame. DSWifi doesn't
+/// interpret any of them, it only replaces the extra data when beacon fragment
+/// cycling has been enabled with Wifi_BeaconSetExtraDataFragments().
+///
+/// The multi-byte fields are stored in the beacon in little endian order, which
+/// is the order used by official software. Note that Wifi_BeaconStart() uses the
+/// opposite order for the game ID for backwards compatibility reasons.
+typedef struct {
+    /// Unknown. Official software uses it to synchronize the LCDs of the
+    /// consoles of a multiplayer group.
+    u16 stepping_offset;
+    /// Unknown. Official software uses it to synchronize the LCDs of the
+    /// consoles of a multiplayer group.
+    u16 lcd_video_sync;
+    /// Fixed identifier: the magic number 0x0001, a version byte and a platform
+    /// byte. A retail DS Download Station was sniffed sending 0x08000001.
+    u32 fixed_id;
+    /// Game ID (GGID). DS Download Station uses 0x00400120.
+    u32 game_id;
+    /// Stream code (TGID). It should be randomized once per host session.
+    u16 stream_code;
+    /// 1 for multicart local multiplayer, 2 for a DS Download Play host that is
+    /// transferring a program, 3 for an idle DS Download Play host.
+    u8 beacon_type;
+    /// Size in bytes announced for the frames sent from the host to clients.
+    u16 cmd_data_size;
+    /// Size in bytes announced for the frames sent from clients to the host.
+    u16 reply_data_size;
+    /// Game-specific data that follows the fixed part of the element. It may be
+    /// NULL if extra_data_size is 0.
+    const void *extra_data;
+    /// Size of extra_data, up to DSWIFI_BEACON_EXTRA_DATA_MAX bytes.
+    size_t extra_data_size;
+    /// Format of the extra data. Use DSWIFI_BEACON_LAYOUT_RAW unless the extra
+    /// data is a DSWifi one, so that the ARM7 doesn't modify it.
+    Wifi_BeaconExtraDataLayout extra_data_layout;
+    /// Leaves the SSID element out of the beacon frame altogether.
+    ///
+    /// A DS Download Play host doesn't announce one: a client works its SSID out
+    /// from the game ID and the stream code in this element instead, and only
+    /// sends it back in its association and probe requests. Every other kind of
+    /// host should leave this false, because 802.11 requires the element.
+    bool omit_ssid;
+} Wifi_BeaconVendorInfo;
+
+/// Sends a beacon frame to the ARM7 with a custom Nintendo vendor element.
+///
+/// This is the general form of Wifi_BeaconStart(). It gives you control over
+/// every field of the Nintendo vendor information element, which is required to
+/// imitate the beacon frames of official software such as DS Download Play.
+///
+/// The extra data of the element can be replaced after the beacon has started
+/// with Wifi_BeaconSetExtraDataFragments() and Wifi_BeaconPatchVendorByte().
+///
+/// @param ssid
+///     SSID to use for the access point. It may be NULL, which creates an
+///     access point without a SSID (like DS Download Play hosts).
+/// @param info
+///     Contents of the Nintendo vendor information element. If it is NULL the
+///     element isn't added to the beacon frame at all.
+///
+/// @return
+///     0 on success, a negative value on error.
+int Wifi_BeaconStartEx(const char *ssid, const Wifi_BeaconVendorInfo *info);
+
+/// Same as Wifi_BeaconStartEx(), but the SSID is given as raw bytes.
+///
+/// DS Download Play hosts announce a 32 byte SSID built from the game ID and the
+/// stream code, which contains zero bytes, so it can't be passed as a string.
+///
+/// The SSID element is added to the beacon frame with a length of zero if there
+/// is no SSID, because 802.11 requires it to be present. Set "omit_ssid" in the
+/// vendor information to leave it out entirely, which is what a DS Download Play
+/// host does.
+///
+/// @param ssid
+///     Bytes of the SSID. It may be NULL if "ssid_len" is 0.
+/// @param ssid_len
+///     Length of the SSID in bytes, up to 32.
+/// @param info
+///     Contents of the Nintendo vendor information element. If it is NULL the
+///     element isn't added to the beacon frame at all.
+///
+/// @return
+///     0 on success, a negative value on error.
+int Wifi_BeaconStartRawSsid(const void *ssid, size_t ssid_len,
+                            const Wifi_BeaconVendorInfo *info);
+
+/// Provides a set of interchangeable "extra data" blocks for the beacon frame.
+///
+/// The ARM7 writes one of the blocks to the beacon frame before every
+/// transmission, cycling through all of them in order. This is how DS Download
+/// Play spreads a game information record that is too big to fit in one beacon
+/// frame over several of them.
+///
+/// The beacon must have been started with Wifi_BeaconStartEx(), and its extra
+/// data size must be the same as "fragment_size".
+///
+/// @param fragments
+///     Array of "count" blocks of "fragment_size" bytes each.
+/// @param fragment_size
+///     Size of each block, up to DSWIFI_BEACON_EXTRA_DATA_MAX bytes.
+/// @param count
+///     Number of blocks, up to DSWIFI_BEACON_MAX_FRAGMENTS.
+///
+/// @return
+///     0 on success, a negative value on error.
+int Wifi_BeaconSetExtraDataFragments(const void *fragments, size_t fragment_size,
+                                     int count);
+
+/// Reports whether the ARM7 is really cycling the "extra data" of the beacon.
+///
+/// A beacon whose fragments never change looks the same from the outside as one
+/// that changes but is rejected by clients, so this tells the two apart.
+///
+/// @param pre_tbtt
+///     Filled with the number of beacons the hardware has been about to send.
+///     It may be NULL.
+/// @param writes
+///     Filled with the number of times a fragment has been written into the
+///     beacon. It may be NULL.
+/// @param skip_reason
+///     Filled with a Wifi_BeaconRotateSkip value describing what the last
+///     attempt did. It may be NULL.
+void Wifi_BeaconGetRotateStatus(int *pre_tbtt, int *writes, int *skip_reason);
+
+/// Overwrites one byte of the Nintendo vendor information element of the beacon
+/// frame that is currently being transmitted.
+///
+/// The ARM7 applies the change after every beacon fragment change, so it isn't
+/// undone by Wifi_BeaconSetExtraDataFragments(). Use it for fields that change
+/// while the beacon is live, like the beacon type.
+///
+/// @note
+///     Give the ARM7 a frame or two for this call to have effect.
+///
+/// @param offset
+///     Offset in bytes from the start of the information element (offset 0 is
+///     the first byte of the OUI). The beacon type is at offset 0x13, and the
+///     extra data starts at offset 0x18.
+/// @param value
+///     Value to write.
+///
+/// @return
+///     0 on success, a negative value if the queue of patches is full.
+int Wifi_BeaconPatchVendorByte(size_t offset, u8 value);
+
+/// Returns the counters that describe what the multiplayer layer has done with
+/// the frames received from clients.
+///
+/// @return
+///     A pointer to the counters. It is never NULL.
+const Wifi_MultiplayerRxDiag *Wifi_MultiplayerGetRxDiag(void);
+
+/// Returns the counters of the multiplayer host kept by the ARM7.
+///
+/// Between them these say whether a stalled transfer is the host failing to
+/// transmit or the client failing to answer.
+///
+/// @param counters
+///     Filled with the counters. Nothing is done if it is NULL.
+void Wifi_MultiplayerGetHostCounters(Wifi_MultiplayerHostCounters *counters);
 
 /// Get the number of clients connected to this DS acting as a multiplayer host.
 ///

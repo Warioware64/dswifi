@@ -54,6 +54,10 @@ int Wifi_ProcessReceivedFrame(int macbase, int framelen)
             return WFLAG_PACKET_MGT;
 
         case TYPE_PROBE_REQUEST: // 0100 00 Probe Request
+            if (WifiData->curMode == WIFIMODE_ACCESSPOINT)
+                Wifi_MPHost_ProcessProbeRequest(&packetheader, macbase);
+            return WFLAG_PACKET_MGT;
+
         case TYPE_ATIM: // 1001 00 ATIM
         case TYPE_DISASSOCIATION: // 1010 00 Disassociation
             return WFLAG_PACKET_MGT;
@@ -99,15 +103,28 @@ int Wifi_ProcessReceivedFrame(int macbase, int framelen)
         // Data Frames
         // -----------
 
-        case TYPE_DATA: // 0000 10 Data
         case TYPE_DATA_CF_ACK: // 0001 10 Data + CF-Ack
+            // The reply of a client to a multiplayer CMD frame, carrying data.
+            // Counted before anything can filter it out: it is the only way to
+            // tell a client that never answers from one whose answers are
+            // discarded later on.
+            WifiData->mpReplyRx++;
+            return WFLAG_PACKET_DATA;
+
+        case TYPE_DATA: // 0000 10 Data
         case TYPE_DATA_CF_POLL: // 0010 10 Data + CF-Poll
         case TYPE_DATA_CF_ACK_CF_POLL: // 0011 10 Data + CF-Ack + CF-Poll
             // We like data!
             return WFLAG_PACKET_DATA;
 
-        case TYPE_NULL_FUNCTION: // 0100 10 Null Function
         case TYPE_CF_ACK: // 0101 10 CF-Ack
+            // A reply with no data in it. A client always transmits in its reply
+            // slot, and sends this when its software hasn't queued anything, so
+            // it means "still here, nothing to say" rather than an error.
+            WifiData->mpReplyEmpty++;
+            return WFLAG_PACKET_DATA;
+
+        case TYPE_NULL_FUNCTION: // 0100 10 Null Function
         case TYPE_CF_POLL: // 0110 10 CF-Poll
         case TYPE_CF_ACK_CF_POLL: // 0111 10 CF-Ack + CF-Poll
             return WFLAG_PACKET_DATA;

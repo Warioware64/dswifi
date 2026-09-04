@@ -32,10 +32,10 @@ LIBDIRS		:= $(BLOCKSDS)/libs/libnds
 # ---------------
 
 ifeq ($(DEBUG),1)
-NAME		:= libdswifi7d
+NAME		:= libdswifi_dl7d
 BUILDDIR	:= build/debug/arm7
 else
-NAME		:= libdswifi7
+NAME		:= libdswifi_dl7
 BUILDDIR	:= build/release/arm7
 endif
 

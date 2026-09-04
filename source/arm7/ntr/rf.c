@@ -15,14 +15,29 @@
 
 static int chdata_save5 = 0;
 
+// Same reasoning as the baseband: a busy flag that only the hardware clears must
+// not be waited on for ever, or a controller left mid-transaction by whatever ran
+// before takes the console with it. See baseband.c.
+#define WIFI_BUSY_RETRIES   0x2710
+
 void Wifi_RFWrite(int writedata)
 {
-    while (W_RF_BUSY & 1);
+    int i = WIFI_BUSY_RETRIES;
+    while (W_RF_BUSY & 1)
+    {
+        if (!i--)
+            return;
+    }
 
     W_RF_DATA1 = writedata;
     W_RF_DATA2 = writedata >> 16;
 
-    while (W_RF_BUSY & 1);
+    i = WIFI_BUSY_RETRIES;
+    while (W_RF_BUSY & 1)
+    {
+        if (!i--)
+            return;
+    }
 }
 
 void Wifi_RFWriteType2(int index, int value)

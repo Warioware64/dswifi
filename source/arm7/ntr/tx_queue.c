@@ -13,7 +13,10 @@
 #include "common/ieee_defs.h"
 #include "common/random.h"
 
-static u16 wifi_tx_queue[1024];
+// The queue has to fit below the CMD frame buffer, which this fork moved down
+// to make room for a full sized multiplayer command. The static assert below is
+// what keeps the two in step.
+static u16 wifi_tx_queue[512];
 static u16 wifi_tx_queue_len = 0; // Length in halfwords
 
 // Make sure that the biggest packet we can store fits in MAC_TXBUF_END_OFFSET
@@ -85,7 +88,7 @@ static int Wifi_TxArm7QueueSetEnqueuedData(u16 *data, size_t datalen)
 {
     // Convert to halfords, rounding up
     size_t hwords = (datalen + 1) >> 1;
-    if (hwords > sizeof(wifi_tx_queue))
+    if (hwords > (sizeof(wifi_tx_queue) / sizeof(wifi_tx_queue[0])))
         return 0;
 
     for (size_t i = 0; i < hwords; i++)
@@ -148,6 +151,9 @@ int Wifi_TxArm7QueueAdd(u16 *data, int datalen)
 // doesn't start the transfer because the header still requires some fields to
 // be filled in.
 //
+// "buffer_end" is the offset one past the end of the destination buffer, not
+// the room left in it: the packet has to fit between "macbase" and it.
+//
 // Important: This only copies one packet!
 static int Wifi_TxArm9QueueCopyFirstData(s32 macbase, u32 buffer_end)
 {
@@ -167,7 +173,10 @@ static int Wifi_TxArm9QueueCopyFirstData(s32 macbase, u32 buffer_end)
     size_t size = read_u32(txbufData + read_idx) & WFLAG_SEND_SIZE_MASK;
     read_idx += sizeof(uint32_t);
 
-    if (size <= buffer_end) // The ARM9 includes the space required by the FCS
+    // Against the room left in the destination, not against where it ends. A
+    // buffer that doesn't start at zero has less space in it than its end
+    // offset suggests, and writing past it corrupts whatever comes after.
+    if (size <= (buffer_end - (u32)macbase)) // The ARM9 includes the space required by the FCS
     {
         const u16 *source = (const u16 *)(txbufData + read_idx);
 
@@ -249,9 +258,27 @@ static int Wifi_TxArm9QueueFlushByCmd(void)
     // doesn't calculate the durations for multiplayer packets.
 
     u16 host_bytes = WifiData->curCmdDataSize;
-    u16 client_bytes = WifiData->curReplyDataSize;
     u16 num_clients = WifiData->clients.num_connected;
-    u16 client_bits = WifiData->clients.aid_mask;
+
+    // The reply time is worked out from the size of a reply without its IEEE
+    // header. GBATEK's formula says to count "the ieee frame header+body+fcs",
+    // and counting all of it is what this used to do, but a retail DS Download
+    // Station announces 0106h where that gives 0166h: exactly the 24 bytes of
+    // the header, times the four microseconds a byte takes at 2 Mbit/s.
+    //
+    // The value matters beyond this console. It is echoed to the clients in the
+    // first halfword of the frame body, and it is how they know when their turn
+    // to answer comes round.
+    u16 client_bytes = WifiData->curReplyDataSize - HDR_DATA_MAC_SIZE;
+
+    // Bit 0 of the mask stands for the host, which is how the rest of the
+    // library reports the players in the game, but it must not go on the air.
+    // The field is a list of the clients to poll, one bit per AID from 1 to 15,
+    // and the hardware allots a reply slot to every bit that is set. A bit 0
+    // costs an extra slot that nobody answers in, shifts every client's slot by
+    // one, and can never be cleared to acknowledge a reply, so the transfer is
+    // always reported as failed and retransmitted.
+    u16 client_bits = WifiData->clients.aid_mask & ~BIT(0);
 
     u16 host_time = host_bytes * 4 + 0x60; // 0x60 = Short preamble
     u16 client_time = client_bytes * 4 + 0xD2; // 0xD0 to 0xD2
@@ -301,6 +328,10 @@ void Wifi_Intr_MultiplayCmdDone(void)
     // retries in W_TX_RETRYLIMIT.
     if (W_MACMEM(MAC_CMDBUF_START_OFFSET + HDR_TX_STATUS) == 5)
     {
+        // For a CMD frame this status means the replies it polled for never
+        // arrived.
+        WifiData->mpCmdFailed++;
+
         u8 retries_left = W_TX_RETRYLIMIT & 0xFF;
         if (retries_left > 0)
         {
@@ -317,6 +348,7 @@ void Wifi_Intr_MultiplayCmdDone(void)
             }
             W_TX_RETRYLIMIT = W_TX_RETRYLIMIT - 1;
             W_MACMEM(MAC_CMDBUF_START_OFFSET + HDR_TX_STATUS) = 0;
+            WifiData->mpCmdRetry++;
             Wifi_TxArm9QueueFlushByCmd();
         }
     }
@@ -420,6 +452,7 @@ int Wifi_TxArm9QueueFlush(void)
         {
             // Set the number of retries before starting.
             W_TX_RETRYLIMIT = 0x0707;
+            WifiData->mpCmdArmed++;
             return Wifi_TxArm9QueueFlushByCmd();
         }
         else

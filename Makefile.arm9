@@ -40,18 +40,18 @@ LIBDIRS		:= $(BLOCKSDS)/libs/libnds
 
 ifeq ($(ENABLE_LWIP),1)
     ifeq ($(DEBUG),1)
-        NAME		:= libdswifi9d
+        NAME		:= libdswifi_dl9d
         BUILDDIR	:= build/debug/arm9
     else
-        NAME		:= libdswifi9
+        NAME		:= libdswifi_dl9
         BUILDDIR	:= build/release/arm9
     endif
 else
     ifeq ($(DEBUG),1)
-        NAME		:= libdswifi9d_noip
+        NAME		:= libdswifi_dl9d_noip
         BUILDDIR	:= build/debug_noip/arm9
     else
-        NAME		:= libdswifi9_noip
+        NAME		:= libdswifi_dl9_noip
         BUILDDIR	:= build/release_noip/arm9
     endif
 endif

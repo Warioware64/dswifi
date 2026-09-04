@@ -250,6 +250,17 @@ static int Wifi_MPHost_SendAssocResponsePacket(void *client_mac, u16 status_code
 
     body_size += 4;
 
+    // Room for one more element, left empty.
+    //
+    // Nintendo's firmware always leaves these two bytes at the end of an
+    // association response, holding an element id and a length, and writes them
+    // as zeros when it has nothing to put there. Clients are used to seeing
+    // them, so send them even though there is nothing to say.
+    *body++ = 0;
+    *body++ = 0;
+
+    body_size += 2;
+
     // Done
 
     size_t ieee_size = sizeof(IEEE_MgtFrameHeader) + body_size;
@@ -265,11 +276,14 @@ static int Wifi_MPHost_SendAssocResponsePacket(void *client_mac, u16 status_code
 
 void Wifi_MPHost_ProcessAssocRequest(Wifi_RxHeader *packetheader, int macbase)
 {
-    u8 data[128];
+    // This buffer needs to be big enough to hold the information elements of
+    // the request. Clients of DS Download Play add a Nintendo vendor element
+    // that would be truncated by a smaller buffer.
+    u8 data[256];
 
     int datalen = packetheader->byteLength;
-    if (datalen > 128)
-        datalen = 128;
+    if (datalen > (int)sizeof(data))
+        datalen = sizeof(data);
 
     // Read IEEE frame, right after the hardware RX header
     Wifi_MACRead((u16 *)data, macbase, HDR_RX_SIZE, (datalen + 1) & ~1);
@@ -287,6 +301,8 @@ void Wifi_MPHost_ProcessAssocRequest(Wifi_RxHeader *packetheader, int macbase)
     {
         WLOG_PUTS("W: Not authenticated\n");
         Wifi_MPHost_SendAssocResponsePacket(client_mac, STATUS_ASSOC_DENIED, 0);
+        WLOG_FLUSH();
+        return;
     }
 
     // Check body information
@@ -309,12 +325,19 @@ void Wifi_MPHost_ProcessAssocRequest(Wifi_RxHeader *packetheader, int macbase)
     // Management Frame Information Elements
     // -------------------------------------
 
-    int i = HDR_TX_SIZE + HDR_MGT_MAC_SIZE + 4; // Skip CAPS and listen interval
+    // "data" holds the IEEE frame without the hardware RX header, so the
+    // elements start right after the MAC header, the capability information and
+    // the listen interval.
+    int i = HDR_MGT_MAC_SIZE + 4;
 
-    while (i < datalen)
+    while ((i + 2) <= datalen)
     {
         int type   = data[i++];
         int seglen = data[i++];
+
+        // Ignore a truncated element instead of reading past the buffer
+        if ((i + seglen) > datalen)
+            break;
 
         switch (type)
         {
@@ -343,6 +366,22 @@ void Wifi_MPHost_ProcessAssocRequest(Wifi_RxHeader *packetheader, int macbase)
                                                         STATUS_ASSOC_BAD_RATES, 0);
                     return;
                 }
+                break;
+            }
+
+            case MGT_FIE_ID_VENDOR:
+            {
+                // Clients of official software (and of DS Download Play) add a
+                // Nintendo vendor element to their association requests. DSWifi
+                // doesn't need anything from it, it is only logged so that it
+                // can be inspected while debugging.
+                if ((seglen >= 4) &&
+                    (data[i + 0] == 0x00) && (data[i + 1] == 0x09) &&
+                    (data[i + 2] == 0xBF) && (data[i + 3] == 0x00))
+                {
+                    WLOG_PRINTF("W: Nintendo assoc tag (%d b)\n", seglen);
+                }
+                break;
             }
 
             default:

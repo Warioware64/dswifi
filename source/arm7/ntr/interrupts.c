@@ -6,6 +6,7 @@
 #include <nds.h>
 
 #include "arm7/ipc.h"
+#include "arm7/ntr/beacon.h"
 #include "arm7/ntr/registers.h"
 #include "arm7/ntr/rx_queue.h"
 #include "arm7/ntr/tx_queue.h"
@@ -79,6 +80,7 @@ void Wifi_Interrupt(void)
 
         if (wIF & IRQ_MULTIPLAY_CMD_DONE)
         {
+            WifiData->mpCmdDone++;
             Wifi_Intr_MultiplayCmdDone();
             W_IF = IRQ_MULTIPLAY_CMD_DONE;
         }
@@ -147,6 +149,12 @@ void Wifi_Interrupt(void)
         if (wIF & IRQ_PRE_BEACON_TIMESLOT) // PreTBTT
         {
             W_IF = IRQ_PRE_BEACON_TIMESLOT;
+
+            // This interrupt happens right before the hardware transmits the
+            // beacon frame stored in MAC RAM, which is the only safe point to
+            // replace part of its contents. This interrupt is only enabled in
+            // multiplayer host mode.
+            Wifi_BeaconRotateFragment();
         }
     }
 }

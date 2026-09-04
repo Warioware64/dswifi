@@ -140,6 +140,9 @@ void Wifi_NTR_Update(void)
     static size_t wifi_scan_index = 0;
     // Index of the next WFC setting to be probed
     static u8 wfc_probe_index = 0;
+    // Whether the scan is set up to capture every frame on one channel rather
+    // than hopping through them looking for hosts.
+    static bool wifi_scan_promisc = false;
 
     // This array defines the order in which channels are scanned. It makes
     // sense to start with the most common channels and try the others next.
@@ -204,6 +207,10 @@ void Wifi_NTR_Update(void)
                 W_TXSTATCNT |= TXSTATCNT_IRQ_MP_ACK;
                 W_IE |= IRQ_MULTIPLAY_CMD_DONE;
 
+                // Trigger an interrupt right before every beacon frame is
+                // transmitted, which is when the beacon can be modified safely.
+                W_IE |= IRQ_PRE_BEACON_TIMESLOT;
+
                 Wifi_NTR_SetupTransferOptions(WIFI_TRANSFER_RATE_2MBPS, true);
 
                 W_BSSID[0] = WifiData->MacAddr[0];
@@ -227,7 +234,9 @@ void Wifi_NTR_Update(void)
 
                 WifiData->counter7 = W_US_COUNT1; // timer hword 2 (each tick is 65.5ms)
                 WifiData->curMode  = WIFIMODE_SCAN;
-                Wifi_SetupFilterMode(WIFI_FILTERMODE_SCAN);
+                wifi_scan_promisc = WifiData->reqFlags & WFLAG_REQ_PROMISC ? true : false;
+                Wifi_SetupFilterMode(wifi_scan_promisc ? WIFI_FILTERMODE_PROMISCUOUS
+                                                       : WIFI_FILTERMODE_SCAN);
                 wifi_scan_index = 0;
                 wfc_probe_index = 0;
                 break;
@@ -299,6 +308,32 @@ void Wifi_NTR_Update(void)
                 WifiData->curMode = WIFIMODE_NORMAL;
                 break;
             }
+            // Promiscuous mode can be turned on and off while scanning, and it
+            // needs a different filter: the scan one only accepts management
+            // frames, so an exchange between two other consoles is invisible.
+            {
+                bool promisc = WifiData->reqFlags & WFLAG_REQ_PROMISC ? true : false;
+
+                if (promisc != wifi_scan_promisc)
+                {
+                    wifi_scan_promisc = promisc;
+                    Wifi_SetupFilterMode(promisc ? WIFI_FILTERMODE_PROMISCUOUS
+                                                 : WIFI_FILTERMODE_SCAN);
+                }
+            }
+
+            // Hopping through the channels finds hosts, but it also misses most
+            // of what any one of them says. Watching an exchange means staying
+            // on whichever channel the caller asked for.
+            if (wifi_scan_promisc)
+            {
+                if (WifiData->curChannel != WifiData->reqChannel)
+                    Wifi_SetChannel(WifiData->reqChannel);
+
+                Wifi_AccessPointTick();
+                break;
+            }
+
             if ((W_US_COUNT1 - WifiData->counter7) > 1)
             {
                 bool change_channel = false;
@@ -484,9 +519,15 @@ void Wifi_NTR_Update(void)
                 W_TXSTATCNT &= ~TXSTATCNT_IRQ_MP_ACK;
                 W_IE &= ~IRQ_MULTIPLAY_CMD_DONE;
 
+                W_IE &= ~IRQ_PRE_BEACON_TIMESLOT;
+
                 WifiData->curMode = WIFIMODE_NORMAL;
                 break;
             }
+
+            // Apply any change to the Nintendo vendor information tag of the
+            // beacon requested by the ARM9.
+            Wifi_BeaconApplyPatches();
 
             u16 mask = WifiData->clients.reqKickClientAIDMask;
             if (mask != 0)

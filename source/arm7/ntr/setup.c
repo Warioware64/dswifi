@@ -154,21 +154,73 @@ void Wifi_NTR_SetupFilterMode(Wifi_FilterMode mode)
 
         case WIFI_FILTERMODE_MULTIPLAYER_HOST:
             // Receive retransmit and multiplayer frames, and STA to DS frames.
-            // There is no need to save empty MP replies and MP ACK packets,
-            // they are handled automatically by the hardware. All we care about
-            // is replies from clients with actual data.
-            W_RXFILTER  = RXFILTER_MGMT_BEACON_OTHER_BSSID;
-                        // | RXFILTER_MP_EMPTY_REPLY
-                        // | RXFILTER_MP_ACK;
+            //
+            // Empty replies and MP ACKs have to be accepted. A client always
+            // transmits something in its reply slot, but the reply is empty
+            // until its software has queued data to send, so a client that
+            // hasn't accepted what the host sent answers every frame with an
+            // empty reply. Filtering those out makes such a client look exactly
+            // like one that isn't answering at all, which is not a distinction
+            // the host can afford to lose. Nintendo's firmware accepts both.
+            //
+            // Probe requests are sent to the broadcast BSSID, so the two
+            // "non-beacon management frames from other BSSIDs" bits are needed
+            // to receive them. Clients looking for a host may send them.
+            W_RXFILTER  = RXFILTER_MGMT_BEACON_OTHER_BSSID
+                        | RXFILTER_MGMT_NONBEACON_OTHER_BSSID
+                        | RXFILTER_MGMT_NONBEACON_OTHER_BSSID_EX
+                        | RXFILTER_MP_EMPTY_REPLY
+                        | RXFILTER_MP_ACK;
             W_RXFILTER2 = RXFILTER2_IGNORE_DS_DS | RXFILTER2_IGNORE_STA_STA
                         | RXFILTER2_IGNORE_DS_STA;
             break;
 
         case WIFI_FILTERMODE_MULTIPLAYER_CLIENT:
-            // Receive retransmit frames and DS to STA frames
-            W_RXFILTER  = RXFILTER_MGMT_BEACON_OTHER_BSSID;
-            W_RXFILTER2 = RXFILTER2_IGNORE_DS_DS | RXFILTER2_IGNORE_STA_STA
-                        | RXFILTER2_IGNORE_STA_DS;
+            // Receive retransmit frames and DS to STA frames.
+            //
+            // The two multiplayer bits let a client see the answers the other
+            // clients give and the acknowledgement the host sends afterwards.
+            // Nothing in the library acts on either, but they are the only way
+            // to watch what a console replies to a host: the hardware appears
+            // to process multiplayer frames only while it is itself taking part
+            // in the exchange, so a console that is merely listening never sees
+            // them however its filter is set.
+            W_RXFILTER  = RXFILTER_MGMT_BEACON_OTHER_BSSID
+                        | RXFILTER_MP_ACK
+                        | RXFILTER_MP_EMPTY_REPLY;
+            // A reply travels from a station to the host, so ignoring that
+            // direction would throw away the very frames the two bits above
+            // were set for. The library drops them itself, they are here to be
+            // watched.
+            W_RXFILTER2 = RXFILTER2_IGNORE_DS_DS | RXFILTER2_IGNORE_STA_STA;
+            break;
+
+        case WIFI_FILTERMODE_PROMISCUOUS:
+            // For watching an exchange between two other consoles.
+            //
+            // This is the multiplayer host filter, which is known to receive
+            // both the frames a host polls with and the answers a client sends,
+            // widened in the two ways that matter: bit 0 accepts broadcasts
+            // whose BSSID isn't ours, which is every frame of somebody else's
+            // session, and W_RXFILTER2 only ignores DS to DS, so both directions
+            // of the exchange get through.
+            //
+            // Setting every bit doesn't work. GBATEK marks bits 1 to 6 as
+            // "unknown, usually zero" and no firmware sets them, and clearing
+            // W_RXFILTER2 entirely is a combination no firmware writes either;
+            // doing both delivered nothing but beacons. The values here stay
+            // within what real firmware uses (it writes 08h, 0Bh or 0Dh).
+            //
+            // Note that this still cannot see a frame addressed to another
+            // console: the hardware filters on the destination address before
+            // any of these bits apply, so the authentication and association
+            // exchange between two other consoles is out of reach.
+            W_RXFILTER  = RXFILTER_MGMT_BEACON_OTHER_BSSID
+                        | RXFILTER_MP_ACK
+                        | RXFILTER_MP_EMPTY_REPLY
+                        | RXFILTER_MGMT_NONBEACON_OTHER_BSSID
+                        | RXFILTER_MGMT_NONBEACON_OTHER_BSSID_EX;
+            W_RXFILTER2 = RXFILTER2_IGNORE_DS_DS;
             break;
     }
 }
@@ -405,16 +457,36 @@ void Wifi_NTR_Init(void)
             swiDelay(5 * 134056); // 5 milliseconds
     }
 
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_NTR_ENTERED);
+
+    // Cut power before enabling it, so the controller starts from a known state
+    // rather than from whatever the last program left behind.
+    //
+    // This matters for a program that arrived over DS Download Play: it starts
+    // with the wireless hardware still powered and in the middle of a multiplayer
+    // session, and initialising on top of that leaves the baseband and the radio
+    // mid-transaction. Their busy flags are cleared by the hardware alone, so the
+    // console used to stop in one of those waits and never reach the point where
+    // the library could say anything.
+    powerOff(POWER_WIFI);
+    swiDelay(5 * 134056); // 5 milliseconds
+
     powerOn(POWER_WIFI); // Enable power for the WiFi controller
     REG_WIFIWAITCNT =
         WIFI_RAM_N_10_CYCLES | WIFI_RAM_S_6_CYCLES | WIFI_IO_N_6_CYCLES | WIFI_IO_S_4_CYCLES;
 
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_POWERED);
+
     Wifi_FlashInitData();
+
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_FLASH_READ);
 
     // reset/shutdown wifi:
     W_MODE_RST = 0xFFFF;
     Wifi_NTR_Stop();
     Wifi_NTR_Shutdown(); // power off wifi
+
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_SHUTDOWN);
 
     WifiData->curChannel     = 1;
     WifiData->reqChannel     = 1;
@@ -424,6 +496,8 @@ void Wifi_NTR_Init(void)
     for (int i = 0; i < W_MACMEM_SIZE; i += 2)
         W_MACMEM(i) = 0;
 
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_MACMEM_CLEARED);
+
     // Load WFC data from flash
     Wifi_NTR_GetWfcSettings();
     if (isDSiMode())
@@ -432,6 +506,8 @@ void Wifi_NTR_Init(void)
         // ignore all the APs that use WPA, only load open and WPE APs.
         Wifi_TWL_GetWfcSettings(false);
     }
+
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_WFC_READ);
 
     WLOG_PRINTF("W: %d valid AP found\n", WifiData->wfc_number_of_configs);
     WLOG_FLUSH();
@@ -447,8 +523,12 @@ void Wifi_NTR_Init(void)
     W_IE = 0;
     Wifi_NTR_WakeUp();
 
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_WOKE_UP);
+
     Wifi_MacInit();
     Wifi_BBInit();
+
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_MAC_BB_INIT);
 
     // Set Default Settings
     W_MACADDR[0] = WifiData->MacAddr[0];
@@ -461,6 +541,8 @@ void Wifi_NTR_Init(void)
 
     Wifi_SetChannel(1);
 
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_CHANNEL_SET);
+
     Wifi_BBWrite(REG_MM3218_CCA, 0x00);
     Wifi_BBWrite(REG_MM3218_ENERGY_DETECTION_THRESHOLD, 0x1F);
 
@@ -469,6 +551,8 @@ void Wifi_NTR_Init(void)
     // Setup WiFi interrupt after we have setup everything else
     irqSet(IRQ_WIFI, Wifi_Interrupt);
     irqEnable(IRQ_WIFI);
+
+    WIFI_SET_INIT_STAGE(WIFI_INIT_STAGE_NTR_DONE);
 }
 
 void Wifi_NTR_Deinit(void)

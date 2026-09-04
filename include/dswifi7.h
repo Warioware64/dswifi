@@ -26,6 +26,18 @@ void Wifi_Update(void);
 /// Setup system FIFO handler for WiFi library messages.
 void installWifiFIFO(void);
 
+/// How far the ARM7 got through its half of the initialization.
+///
+/// The same number the ARM9 reads with Wifi_GetInitFailStage(), but taken from
+/// this CPU's own memory instead of the struct the two CPUs share. It is only
+/// useful while working out why initialization failed: if the ARM9 reads zero
+/// and this doesn't, the two CPUs disagree about where that struct is, which is
+/// a different problem from the ARM7 never having started.
+///
+/// @return
+///     The last step this CPU reached, or zero if it reached none.
+int Wifi_GetInitStage7(void);
+
 #ifdef __cplusplus
 }
 #endif

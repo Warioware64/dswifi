@@ -1,0 +1,4 @@
+build/
+*.nds
+image.bin
+compile_commands.json

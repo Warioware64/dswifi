@@ -40,6 +40,11 @@ void Wifi_MACWrite(const u16 *src, u32 MAC_Base, int length);
 // Write one byte to MAC RAM.
 void Wifi_MacWriteByte(int address, int value);
 
+// Write a block of bytes to MAC RAM. Unlike Wifi_MACWrite(), the destination
+// address doesn't need to be aligned to a halfword, and the length doesn't need
+// to be a multiple of 16 bits.
+void Wifi_MacWriteBytes(u32 address, const u8 *src, size_t length);
+
 // Read one byte from MAC RAM.
 int Wifi_MacReadByte(int address);
 

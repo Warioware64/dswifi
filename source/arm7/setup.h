@@ -11,6 +11,19 @@
 void Wifi_Init(void *wifidata);
 void Wifi_Deinit(void);
 
+// The stage the ARM7 reached in Wifi_Init(), kept on this side as well as in
+// the shared struct. The two are written together, so a difference between them
+// says the two CPUs disagree about where the struct is rather than that the
+// ARM7 stopped. See WIFI_INIT_STAGE_* in wifi_shared.h.
+extern u8 wifi_init_stage7;
+
+#define WIFI_SET_INIT_STAGE(stage)          \
+    do                                      \
+    {                                       \
+        wifi_init_stage7 = (stage);         \
+        WifiData->initStage = (stage);      \
+    } while (0)
+
 void Wifi_Start(void);
 void Wifi_Stop(void);
 
@@ -20,6 +33,7 @@ typedef enum {
     WIFI_FILTERMODE_INTERNET,
     WIFI_FILTERMODE_MULTIPLAYER_HOST,
     WIFI_FILTERMODE_MULTIPLAYER_CLIENT,
+    WIFI_FILTERMODE_PROMISCUOUS,
 } Wifi_FilterMode;
 
 void Wifi_SetupFilterMode(Wifi_FilterMode mode);

@@ -9,5 +9,6 @@
 #include "common/wifi_shared.h"
 
 void Wifi_ProcessBeaconOrProbeResponse(Wifi_RxHeader *packetheader, int macbase);
+void Wifi_MPHost_ProcessProbeRequest(Wifi_RxHeader *packetheader, int macbase);
 
 #endif // DSWIFI_ARM7_NTR_IEEE_802_11_BEACON_H__

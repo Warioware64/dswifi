@@ -8,6 +8,7 @@
 #include "arm7/access_point.h"
 #include "arm7/debug.h"
 #include "arm7/ipc.h"
+#include "arm7/ntr/beacon.h"
 #include "arm7/ntr/mac.h"
 #include "arm7/ntr/registers.h"
 #include "arm7/ntr/tx_queue.h"
@@ -37,7 +38,7 @@ static bool Wifi_IsVendorMicrosoft(u8 *data, size_t len)
 
 static bool Wifi_IsVendorNintendo(u8 *data, size_t len)
 {
-    if (len >= sizeof(FieVendorNintendo))
+    if (len >= sizeof(FieVendorNintendoHeader))
     {
         // Nintendo OUI
         if ((data[0] == 0x00) && (data[1] == 0x09) && (data[2] == 0xBF) &&
@@ -97,20 +98,31 @@ static void Wifi_ProcessVendorTag(u8 *data, size_t len, bool *has_nintendo_info,
     {
         *has_nintendo_info = true;
 
-        FieVendorNintendo *fie = (void *)data;
+        FieVendorNintendoHeader *hdr = (void *)data;
 
-        info->game_id = (fie->game_id[0] << 24) | (fie->game_id[1] << 16) |
-                        (fie->game_id[2] << 8) | (fie->game_id[3] << 0);
+        info->game_id = (hdr->game_id[0] << 24) | (hdr->game_id[1] << 16) |
+                        (hdr->game_id[2] << 8) | (hdr->game_id[3] << 0);
 
-        info->players_max = fie->extra_data.players_max;
-        info->players_current = fie->extra_data.players_current;
-        info->allows_connections = fie->extra_data.allows_connections;
+        // Only hosts created by DSWifi have the extra data in the format that
+        // this library expects. Other hosts (like the ones of official games,
+        // or DS Download Play) use their own formats, so their extra data must
+        // not be parsed as if it was ours.
+        if ((hdr->beacon_type != 1) ||
+            (hdr->extra_data_size < sizeof(DSWifiExtraData)) ||
+            (len < sizeof(FieVendorNintendo)))
+            return;
 
-        info->name_len = fie->extra_data.name_len;
+        DSWifiExtraData *extra = (void *)(data + sizeof(FieVendorNintendoHeader));
+
+        info->players_max = extra->players_max;
+        info->players_current = extra->players_current;
+        info->allows_connections = extra->allows_connections;
+
+        info->name_len = extra->name_len;
         for (u8 i = 0; i < DSWIFI_BEACON_NAME_SIZE / sizeof(u16); i++)
         {
-            info->name[i] = fie->extra_data.name[i * 2]
-                          | (fie->extra_data.name[(i * 2) + 1] << 8);
+            info->name[i] = extra->name[i * 2]
+                          | (extra->name[(i * 2) + 1] << 8);
         }
 
         return;
@@ -328,4 +340,68 @@ void Wifi_ProcessBeaconOrProbeResponse(Wifi_RxHeader *packetheader, int macbase)
                         compatible, has_nintendo_info ? &nintendo_info : NULL);
 
     //WLOG_FLUSH();
+}
+
+// Answers a probe request while acting as a multiplayer host.
+//
+// A console looking for a game scans by sending these, and a real host answers
+// every one of them. DSWifi used to log them and drop them, which left it
+// findable only by whoever happened to be listening when a beacon went out.
+void Wifi_MPHost_ProcessProbeRequest(Wifi_RxHeader *packetheader, int macbase)
+{
+    // Big enough for the header and the elements a scanning console sends: an
+    // SSID of up to 32 bytes and a list of rates.
+    u8 data[128];
+
+    int datalen = packetheader->byteLength;
+    if (datalen > (int)sizeof(data))
+        datalen = sizeof(data);
+
+    // Read IEEE frame, right after the hardware RX header
+    Wifi_MACRead((u16 *)data, macbase, HDR_RX_SIZE, (datalen + 1) & ~1);
+
+    if (datalen < HDR_MGT_MAC_SIZE)
+        return;
+
+    void *client_mac = data + HDR_MGT_SA;
+
+    // Find the SSID the request is asking for. An empty one asks every host in
+    // range to answer.
+    const u8 *ssid = NULL;
+    size_t ssid_len = 0;
+
+    int i = HDR_MGT_MAC_SIZE;
+
+    while ((i + 2) <= datalen)
+    {
+        int type = data[i++];
+        int seglen = data[i++];
+
+        // Ignore a truncated element instead of reading past the buffer
+        if ((i + seglen) > datalen)
+            break;
+
+        if (type == MGT_FIE_ID_SSID)
+        {
+            ssid = data + i;
+            ssid_len = seglen;
+            break;
+        }
+
+        i += seglen;
+    }
+
+    int sent = Wifi_SendProbeResponse(client_mac, ssid, ssid_len);
+
+    // The source is logged because a console that has already connected has no
+    // business scanning: probe requests from the client being served would mean
+    // it has given up on this host and gone looking for another one.
+    // The ARM7 console has a minimal printf with no field widths, so "%02x" is
+    // rejected as an unsupported flag and the whole line is dropped.
+    WLOG_PRINTF("W: [R] Probe Req %x:%x:%x %s\n",
+                data[HDR_MGT_SA + 3], data[HDR_MGT_SA + 4], data[HDR_MGT_SA + 5],
+                sent ? "resp" : "no");
+    WLOG_FLUSH();
+
+    (void)sent; // The log is compiled out of release builds
 }

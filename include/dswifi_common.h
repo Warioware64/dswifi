@@ -27,6 +27,30 @@ extern "C" {
 /// Size in bytes reserved in beacon frames for the multiplayer host player name.
 #define DSWIFI_BEACON_NAME_SIZE 20
 
+/// Biggest "extra data" block that can be stored in the Nintendo vendor
+/// information element of a beacon frame.
+///
+/// DS Download Play uses blocks of this exact size.
+#define DSWIFI_BEACON_EXTRA_DATA_MAX 0x70
+
+/// Maximum number of interchangeable "extra data" blocks of a beacon frame.
+///
+/// DS Download Play splits its game information record in 10 blocks.
+#define DSWIFI_BEACON_MAX_FRAGMENTS 10
+
+/// Layout of the "extra data" of the Nintendo vendor information element.
+///
+/// It determines which fields of the beacon frame the ARM7 is allowed to update
+/// on its own while the beacon is being transmitted.
+typedef enum {
+    /// Format used by DSWifi in local multiplayer mode. The ARM7 keeps the
+    /// number of connected players and the "allows connections" flag updated.
+    DSWIFI_BEACON_LAYOUT_DSWIFI = 0,
+    /// Format defined by the application, like the one of DS Download Play. The
+    /// ARM7 never modifies the extra data on its own.
+    DSWIFI_BEACON_LAYOUT_RAW    = 1,
+} Wifi_BeaconExtraDataLayout;
+
 /// This AP is an ad hoc AP. Not used.
 #define WFLAG_APDATA_ADHOC         0x0001 // TODO: Unused
 /// This AP uses WEP encryption.
@@ -269,6 +293,86 @@ typedef struct WIFI_ACCESSPOINT
     // which operates on words.
     u32 spinlock;
 } Wifi_AccessPoint;
+
+/// Reasons why the ARM7 may not replace the "extra data" of the beacon frame
+/// before a transmission.
+typedef enum {
+    /// A fragment was written, nothing was skipped.
+    DSWIFI_BEACON_ROTATE_OK = 0,
+    /// The beacon has no Nintendo vendor information element to write into.
+    DSWIFI_BEACON_ROTATE_NO_VENDOR_IE,
+    /// The hardware isn't transmitting a beacon.
+    DSWIFI_BEACON_ROTATE_BEACON_OFF,
+    /// There is nothing to cycle through: no fragments, or only one.
+    DSWIFI_BEACON_ROTATE_NO_FRAGMENTS,
+    /// The fragments aren't the same size as the extra data of the beacon.
+    DSWIFI_BEACON_ROTATE_SIZE_MISMATCH,
+} Wifi_BeaconRotateSkip;
+
+/// Reasons why a frame from a client can be discarded before it reaches the
+/// packet handler of the application.
+typedef enum {
+    /// No handler has been registered.
+    DSWIFI_MP_DROP_NO_HANDLER = 0,
+    /// The frame is shorter than the multiplayer header.
+    DSWIFI_MP_DROP_TOO_SHORT,
+    /// The frame isn't a reply or a data frame from a client.
+    DSWIFI_MP_DROP_FRAME_TYPE,
+    /// A reply frame wasn't addressed to the multiplayer reply address.
+    DSWIFI_MP_DROP_REPLY_MAC,
+    /// A data frame wasn't addressed to this console.
+    DSWIFI_MP_DROP_DEST_MAC,
+    /// The association ID in the frame doesn't match the one of the client that
+    /// owns the source MAC address.
+    DSWIFI_MP_DROP_AID_MISMATCH,
+
+    DSWIFI_MP_DROP_COUNT
+} Wifi_MultiplayerDropReason;
+
+/// Number of bytes kept from the last discarded frame.
+#define DSWIFI_MP_DIAG_BYTES    16
+
+/// Counters that describe what the multiplayer layer has done with the frames
+/// received from clients.
+///
+/// Frames that don't look the way the library expects are discarded without
+/// reaching the application, which makes a wrong wire format look the same as a
+/// silent client. These counters, and the copy of the last discarded frame, tell
+/// the two apart.
+typedef struct {
+    /// Number of frames discarded for each reason in Wifi_MultiplayerDropReason.
+    u16 drops[DSWIFI_MP_DROP_COUNT];
+    /// Number of frames passed on to the handler.
+    u16 accepted;
+
+    /// First bytes of the last discarded frame, starting at the IEEE header.
+    u8 last_drop_frame[DSWIFI_MP_DIAG_BYTES];
+    /// Number of bytes stored in "last_drop_frame".
+    u8 last_drop_len;
+    /// Reason the frame in "last_drop_frame" was discarded.
+    u8 last_drop_reason;
+} Wifi_MultiplayerRxDiag;
+
+/// Counters of the multiplayer host, kept by the ARM7.
+typedef struct {
+    /// Distinct CMD frames handed to the hardware.
+    u16 cmd_armed;
+    /// Times a CMD frame was handed over again after a failure. The hardware
+    /// sees "cmd_armed + cmd_retry" transmissions.
+    u16 cmd_retry;
+    /// Transfers the hardware reported as finished.
+    u16 cmd_done;
+    /// Transfers the hardware reported as failed. For a CMD frame this means the
+    /// replies it polled for never arrived.
+    u16 cmd_failed;
+    /// Reply frames carrying data, counted before any are filtered.
+    u16 reply_rx;
+    /// Replies with nothing in them. A client always answers in its reply slot,
+    /// and sends an empty reply while its software has nothing queued, so these
+    /// mean the client is there and listening but hasn't accepted what it was
+    /// sent.
+    u16 reply_empty;
+} Wifi_MultiplayerHostCounters;
 
 /// Possible states of a client
 typedef enum {

@@ -66,8 +66,8 @@ static_assert(sizeof(Wifi_RxHeader) == 12);
 //
 //     Offsets     |    Addresses    | Size | Notes
 // ================+=================+======+=======================
-// 0x0000 - 0x08BF | 0x4000 - 0x48BF | 2240 | TX buffer: Not a circular buffer
-// 0x08C0 - 0x09FF | 0x48C0 - 0x49FF |  320 | Multiplayer CMD frame buffer
+// 0x0000 - 0x06FF | 0x4000 - 0x46FF | 1792 | TX buffer: Not a circular buffer
+// 0x0700 - 0x09FF | 0x4700 - 0x49FF |  768 | Multiplayer CMD frame buffer
 // ----------------+-----------------+------+-----------------------
 // 0x0A00 - 0x0AFF | 0x4A00 - 0x4AFF |  256 | Client frame (buffer 1) / Beacon frame
 // 0x0B00 - 0x0BFF | 0x4B00 - 0x4BFF |  256 | Client frame (buffer 2) / Beacon frame
@@ -75,6 +75,14 @@ static_assert(sizeof(Wifi_RxHeader) == 12);
 // 0x0C00 - 0x1F5F | 0x4C00 - 0x5F5F | 4960 | RX buffer: Circular buffer
 // ----------------+-----------------+------+-----------------------
 // 0x1F60 - 0x1FFF | 0x5F60 - 0x5FFF |  160 | Internal use (WEP keys, etc)
+//
+// The boundary between the TX buffer and the CMD frame buffer is a software
+// decision (both W_TXBUF_LOC3 and W_TXBUF_CMD can point anywhere in MAC RAM).
+// The CMD buffer is bigger than what DSWifi itself needs so that it can hold
+// the 500 byte CMD frames used by DS Download Play. The TX buffer only needs
+// to hold one frame at a time, and the biggest one is an Internet mode data
+// frame: 1300 (MTU) + 8 (LLC/SNAP) + 24 (IEEE) + 12 (TX) + 4 (FCS) + 4 (WEP
+// IV) = 1352 bytes.
 
 #define MAC_BASE_ADDRESS            0x4000
 #define MAC_SIZE                    0x2000
@@ -82,7 +90,7 @@ static_assert(sizeof(Wifi_RxHeader) == 12);
 // Definitions used in all modes
 
 #define MAC_TXBUF_START_OFFSET      0x0000
-#define MAC_TXBUF_END_OFFSET        0x08C0
+#define MAC_TXBUF_END_OFFSET        0x0700
 
 #define MAC_TXBUF_START_ADDRESS     (MAC_BASE_ADDRESS + MAC_TXBUF_START_OFFSET)
 #define MAC_TXBUF_END_ADDRESS       (MAC_BASE_ADDRESS + MAC_TXBUF_END_OFFSET)
@@ -93,7 +101,7 @@ static_assert(sizeof(Wifi_RxHeader) == 12);
 // two halfwords right after the MAC header. In a CMD frame those are the
 // client time and client bits fields, but in any other frame they are user
 // data.
-#define MAC_CMDBUF_START_OFFSET     0x08C0
+#define MAC_CMDBUF_START_OFFSET     0x0700
 #define MAC_CMDBUF_END_OFFSET       0x0A00
 #define MAC_CMDBUF_SIZE             (MAC_CMDBUF_END_OFFSET - MAC_CMDBUF_START_OFFSET)
 
@@ -120,6 +128,16 @@ static_assert(sizeof(Wifi_RxHeader) == 12);
 
 #define MAC_RXBUF_START_ADDRESS     (MAC_BASE_ADDRESS + MAC_RXBUF_START_OFFSET)
 #define MAC_RXBUF_END_ADDRESS       (MAC_BASE_ADDRESS + MAC_RXBUF_END_OFFSET)
+
+// Make sure that the regions above are contiguous, without gaps or overlaps.
+
+static_assert(MAC_TXBUF_END_OFFSET == MAC_CMDBUF_START_OFFSET);
+static_assert(MAC_CMDBUF_END_OFFSET == MAC_BEACON_START_OFFSET);
+static_assert(MAC_CMDBUF_END_OFFSET == MAC_CLIENT_RX1_START_OFFSET);
+static_assert(MAC_CLIENT_RX1_END_OFFSET == MAC_CLIENT_RX2_START_OFFSET);
+static_assert(MAC_CLIENT_RX2_END_OFFSET == MAC_RXBUF_START_OFFSET);
+static_assert(MAC_BEACON_END_OFFSET == MAC_RXBUF_START_OFFSET);
+static_assert(MAC_RXBUF_END_OFFSET <= MAC_SIZE);
 
 // Types of packets that can be received by the DS
 // ===============================================

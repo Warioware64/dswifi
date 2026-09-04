@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# SPDX-FileContributor: Antonio Niño Díaz, 2025
+
+BLOCKSDS	?= /opt/blocksds/core
+BLOCKSDSEXT	?= /opt/blocksds/external
+
+# Build against the copy of the library in this repository. Run "make" in the
+# root of the repository first to build it. Set DSWIFI_DL to
+# "$(BLOCKSDSEXT)/dswifi_dl" to use an installed copy instead.
+DSWIFI_DL	?= $(abspath $(CURDIR)/../..)
+
+ifeq ($(DEBUG),1)
+    DEFINES	:= -DDSWIFI_LOGS
+    LIBS	:= -ldswifi_dl9d_noip -lnds9d
+else
+    LIBS	:= -ldswifi_dl9_noip -lnds9
+endif
+
+LIBDIRS		:= $(DSWIFI_DL)
+
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9arm7/Makefile.arm9

@@ -138,6 +138,34 @@ void Wifi_MacWriteByte(int address, int value)
         W_MACMEM(addr) = (W_MACMEM(addr) & 0xFF00) | (value << 0);
 }
 
+void Wifi_MacWriteBytes(u32 address, const u8 *src, size_t length)
+{
+    if (length == 0)
+        return;
+
+    // MAC RAM can only be accessed in 16-bit units. If the destination starts
+    // or ends in the middle of a halfword those bytes need a read-modify-write,
+    // but the bytes in between can be written directly.
+
+    if (address & 1)
+    {
+        Wifi_MacWriteByte(address, *src++);
+        address++;
+        length--;
+    }
+
+    while (length >= 2)
+    {
+        W_MACMEM(address) = src[0] | (src[1] << 8);
+        address += 2;
+        src += 2;
+        length -= 2;
+    }
+
+    if (length > 0)
+        Wifi_MacWriteByte(address, *src);
+}
+
 int Wifi_MacReadByte(int address)
 {
     // We can only read/write this RAM in 16-bit units, so we need to check
