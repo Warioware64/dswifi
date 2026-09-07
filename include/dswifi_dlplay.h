@@ -59,6 +59,13 @@ extern "C" {
 /// Size in bytes of the parameter a host can pass to the program it sends.
 #define DSWIFI_DLPLAY_USER_PARAM_SIZE   0x20
 
+/// Size in bytes of the application data a host announces in beacon frames.
+///
+/// Unlike DSWIFI_DLPLAY_USER_PARAM_SIZE, which is handed to the program once it
+/// has been sent, this travels in every beacon frame and is read by consoles
+/// that are only looking at the room.
+#define DSWIFI_DLPLAY_USER_VOLAT_SIZE   8
+
 /// The most players a program can be announced as supporting, counting the host.
 /// It is the limit of the field in the record clients read, and of the number of
 /// consoles one host can have associated at a time.
@@ -149,6 +156,48 @@ typedef enum {
 /// @return
 ///     0 on success, a negative value on error.
 int Wifi_DlPlayStart(const void *rom, size_t rom_size, const Wifi_DlPlayInfo *info);
+
+/// Replaces the information announced in beacon frames while hosting.
+///
+/// The icon, the title, the description and the name of the host are rebuilt
+/// from "info" exactly as Wifi_DlPlayStart() built them, and consoles that had
+/// already read the old ones read these instead.
+///
+/// Two fields of "info" are ignored, because they are settled when the host
+/// starts and nothing can move them afterwards: "max_players" decides the size
+/// of the room and the size of the frames it is served with, and "user_param" is
+/// part of the message that starts the program on a client.
+///
+/// Whoever is in the room stays announced across the change.
+///
+/// Every call restarts the cycle of beacon frames that carries this information,
+/// which takes about a second to complete, so it is meant for the occasional
+/// change rather than for something updated every frame.
+///
+/// @param info
+///     Information shown in the Download Play menu of the client, as in
+///     Wifi_DlPlayStart().
+///
+/// @return
+///     0 on success, a negative value on error.
+int Wifi_DlPlaySetInfo(const Wifi_DlPlayInfo *info);
+
+/// Sets the application data announced in beacon frames.
+///
+/// These bytes travel next to the list of players, so any console looking at the
+/// room reads them without joining it. The library doesn't use them for
+/// anything; what they mean is up to the program.
+///
+/// Setting the same bytes again does nothing. Setting different ones restarts
+/// the cycle of beacon frames, so this is for room state that changes now and
+/// then rather than every frame.
+///
+/// @param data
+///     DSWIFI_DLPLAY_USER_VOLAT_SIZE bytes to announce, or NULL to clear them.
+///
+/// @return
+///     0 on success, a negative value on error.
+int Wifi_DlPlaySetUserVolatData(const void *data);
 
 /// Stops acting as a DS Download Play host.
 void Wifi_DlPlayStop(void);
@@ -297,6 +346,39 @@ typedef enum {
 /// @param mode
 ///     WIFI_DLPLAY_BOOT_AUTOMATIC or WIFI_DLPLAY_BOOT_MANUAL.
 void Wifi_DlPlaySetBootMode(Wifi_DlPlayBootMode mode);
+
+/// Holds newly connected clients before any program blocks are sent, so several
+/// consoles can join the room first and then download together.
+///
+/// While gather is on, a client that has taken the boot information waits at the
+/// point just before the transfer starts instead of beginning to download. No
+/// program blocks go out, so the host is not "busy sending" and other consoles
+/// can still pick it from their Download Play menu and join. Turn it off once
+/// the room is set: every waiting client then starts downloading on the shared
+/// broadcast stream.
+///
+/// This is the only reliable way to serve more than one console, because a
+/// console will not join a host that is already streaming a program to someone
+/// else. Set it before or right after Wifi_DlPlayStart(); starting a session
+/// resets it to off.
+///
+/// @param gather
+///     true to hold clients, false to release them and begin the transfers.
+void Wifi_DlPlaySetGather(bool gather);
+
+/// Forces the small (256-byte) command frame for the next session.
+///
+/// A retail Download Station kiosk always uses the 256-byte frame, not the
+/// 510-byte one a program transfer uses. Its content goes out in small chunks
+/// that the big frame only pads, and the small frame's shorter air time sends
+/// them noticeably faster -- and it is the frame the retail station client
+/// expects. Call this before Wifi_DlPlayStart() when hosting a station transfer;
+/// it stays in effect until changed, so a plain program transfer should set it
+/// back to false.
+///
+/// @param small
+///     true to advertise and use the 256-byte frame, false for the default.
+void Wifi_DlPlaySetSmallFrame(bool small);
 
 /// Tells one client to start the program it has downloaded.
 ///

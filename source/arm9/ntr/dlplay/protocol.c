@@ -275,6 +275,26 @@ static bool dlplay_room_full = false;
 // Who decides when a client starts the program it has downloaded.
 static Wifi_DlPlayBootMode dlplay_boot_mode = WIFI_DLPLAY_BOOT_AUTOMATIC;
 
+// Gather mode. While set, clients that have taken the boot information are held
+// at DLPLAY_PSTATE_WAIT_TO_SEND instead of being advanced to SEND_PROCEED, so no
+// program blocks go out. It lets several consoles join and settle in the room
+// before any download starts -- which is the only reliable way to serve more
+// than one, because a console will not pick a host from its Download Play menu
+// once that host is already streaming a program to someone else. The host clears
+// it (Wifi_DlPlaySetGather(false)) when its room is set, and every waiting
+// client then starts downloading together on the shared broadcast stream.
+static bool dlplay_gather = false;
+
+// Force the small (256-byte) command frame. A retail Download Station kiosk
+// always advertises cmd_data_size 256, not the 510 a program transfer uses --
+// confirmed by capturing both. The station serves one small chunk (<=126 bytes)
+// per frame, so the big frame is mostly dead air: 510 bytes cost 2522 us on the
+// wire, 256 only 1506, so the small frame sends chunks ~1.67x faster. It is also
+// the size the retail station client itself expects. Set for a station transfer
+// before Wifi_DlPlayStart (Wifi_DlPlaySetSmallFrame), read by the frame-size
+// pick below.
+static bool dlplay_small_frame = false;
+
 // Messages to and from the programs this host has already sent.
 static Wifi_DlPlayAppHandlerFn dlplay_app_handler = NULL;
 static void *dlplay_app_arg = NULL;
@@ -1307,7 +1327,10 @@ static void Wifi_DlPlaySendForState(void)
                 // The client repeats that it has the boot information, and that
                 // second answer is what starts the transfer. Start anyway if it
                 // doesn't come.
-                if (client->wait_count > DLPLAY_START_SEND_FRAMES)
+                //
+                // Held here while gathering: no client begins downloading until
+                // the host releases the room, so several can join first.
+                if (!dlplay_gather && client->wait_count > DLPLAY_START_SEND_FRAMES)
                 {
                     Wifi_DlPlaySetClientStage(client, DLPLAY_PSTATE_SEND_PROCEED);
                     bmp_send |= 1 << aid;
@@ -1739,7 +1762,7 @@ static void Wifi_DlPlayFromClientHandler(Wifi_MPPacketType type, int aid,
 
             if (client->stage == DLPLAY_PSTATE_REQ_ACCEPTED)
                 Wifi_DlPlaySetClientStage(client, DLPLAY_PSTATE_WAIT_TO_SEND);
-            else if (client->stage == DLPLAY_PSTATE_WAIT_TO_SEND)
+            else if (!dlplay_gather && client->stage == DLPLAY_PSTATE_WAIT_TO_SEND)
                 Wifi_DlPlaySetClientStage(client, DLPLAY_PSTATE_SEND_PROCEED);
             break;
 
@@ -1784,7 +1807,7 @@ static void Wifi_DlPlayFromClientHandler(Wifi_MPPacketType type, int aid,
                 dlplay_diag.blocks_received = client->request.blocks_received;
             }
 
-            if (client->stage == DLPLAY_PSTATE_WAIT_TO_SEND)
+            if (!dlplay_gather && client->stage == DLPLAY_PSTATE_WAIT_TO_SEND)
                 Wifi_DlPlaySetClientStage(client, DLPLAY_PSTATE_SEND_PROCEED);
             break;
 
@@ -1873,7 +1896,10 @@ static void Wifi_DlPlayPickFrameSize(const Wifi_DlPlayInfo *info)
 
     dlplay_max_clients = players - 1;
 
-    if (dlplay_max_clients > DLPLAY_LARGE_ROOM_CLIENTS)
+    // The small frame when the room is large, or when a station transfer asks
+    // for it -- a kiosk uses the small frame whatever the room size, because its
+    // content goes out in small chunks that the big frame would only pad.
+    if (dlplay_small_frame || (dlplay_max_clients > DLPLAY_LARGE_ROOM_CLIENTS))
     {
         dlplay_cmd_data_size = DLPLAY_CMD_DATA_SIZE_SMALL;
         dlplay_block_size = DLPLAY_CMD_DATA_SIZE_SMALL - DLPLAY_BLOCK_OVERHEAD;
@@ -1898,6 +1924,7 @@ int Wifi_DlPlayStart(const void *rom, size_t rom_size, const Wifi_DlPlayInfo *in
     dlplay_room_locked = false;
     dlplay_room_full = false;
     dlplay_boot_mode = WIFI_DLPLAY_BOOT_AUTOMATIC;
+    dlplay_gather = false;
     dlplay_app_out_pending = false;
     dlplay_app_out_size = 0;
 
@@ -1924,9 +1951,12 @@ int Wifi_DlPlayStart(const void *rom, size_t rom_size, const Wifi_DlPlayInfo *in
     Wifi_MultiplayerFromClientSetPacketHandler(Wifi_DlPlayFromClientHandler);
     Wifi_MultiplayerAllowNewClients(true);
 
+    // Nobody is in the room yet, whatever the last host that ran announced.
+    Wifi_DlPlayBeaconResetPlayers();
+
     // This hands the fragments of the game information record over to the ARM7,
     // which doesn't need the hardware to be in host mode yet.
-    if (Wifi_DlPlayBeaconSetInfo(&dlplay_rom, info) != 0)
+    if (Wifi_DlPlayBeaconSetInfo(&dlplay_rom, info, dlplay_max_clients) != 0)
     {
         // Undo the host mode setup above. Returning without doing it would leave
         // the library accepting clients for a transfer that will never start, and
@@ -1940,6 +1970,25 @@ int Wifi_DlPlayStart(const void *rom, size_t rom_size, const Wifi_DlPlayInfo *in
     dlplay_active = true;
 
     return 0;
+}
+
+int Wifi_DlPlaySetInfo(const Wifi_DlPlayInfo *info)
+{
+    if (!dlplay_active)
+        return -1;
+
+    // The size of the room isn't the caller's to change here: it was handed to
+    // Wifi_MultiplayerHostMode() when the host started, and it decided how the
+    // program was cut into blocks. The one the room really has is announced.
+    return Wifi_DlPlayBeaconSetInfo(&dlplay_rom, info, dlplay_max_clients);
+}
+
+int Wifi_DlPlaySetUserVolatData(const void *data)
+{
+    if (!dlplay_active)
+        return -1;
+
+    return Wifi_DlPlayBeaconSetUserVolatData(data);
 }
 
 // Creates the beacon frame that announces the program. It can only be done once
@@ -2091,14 +2140,25 @@ void Wifi_DlPlayUpdate(void)
     // clients throw away the game information and wait for details that never
     // arrive.
     u16 players = 0;
+    Wifi_DlPlayMember members[WIFI_MAX_MULTIPLAYER_CLIENTS + 1] = { 0 };
 
     for (int aid = 1; aid <= WIFI_MAX_MULTIPLAYER_CLIENTS; aid++)
     {
-        if (dlplay_clients[aid].request.valid)
-            players |= 1 << aid;
+        const Wifi_DlPlayClientRequest *request = &dlplay_clients[aid].request;
+
+        if (!request->valid)
+            continue;
+
+        players |= 1 << aid;
+
+        // The name and the colour the client's owner set in the console
+        // settings, which arrived in the request asking to join.
+        members[aid].favorite_color = request->favorite_color;
+        members[aid].name_len = request->name_len;
+        memcpy(members[aid].name, request->name, sizeof(members[aid].name));
     }
 
-    Wifi_DlPlayBeaconSetPlayers(players);
+    Wifi_DlPlayBeaconSetPlayers(players, members);
 
     if (associated == 0)
     {
@@ -2150,7 +2210,13 @@ void Wifi_DlPlayGetProgress(int *current, int *total)
         {
             const Wifi_DlPlayClient *client = &dlplay_clients[aid];
 
-            if (client->stage == DLPLAY_PSTATE_NONE)
+            // Only the consoles actually taking the program have a position in
+            // it. Every other stage leaves next_block at 0 -- a console still
+            // associating, one running the Download Station program, one
+            // running what it was sent -- and counting those pinned the
+            // reported progress at zero for as long as any of them was in the
+            // room, which with more than one console is most of the time.
+            if (client->stage != DLPLAY_PSTATE_SEND_PROCEED)
                 continue;
 
             if ((lowest < 0) || (client->next_block < lowest))
@@ -2237,6 +2303,16 @@ int Wifi_DlPlayAppSend(const void *data, size_t size)
 void Wifi_DlPlaySetBootMode(Wifi_DlPlayBootMode mode)
 {
     dlplay_boot_mode = mode;
+}
+
+void Wifi_DlPlaySetGather(bool gather)
+{
+    dlplay_gather = gather;
+}
+
+void Wifi_DlPlaySetSmallFrame(bool small)
+{
+    dlplay_small_frame = small;
 }
 
 bool Wifi_DlPlayBootClient(int aid)

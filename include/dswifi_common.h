@@ -35,8 +35,10 @@ extern "C" {
 
 /// Maximum number of interchangeable "extra data" blocks of a beacon frame.
 ///
-/// DS Download Play splits its game information record in 10 blocks.
-#define DSWIFI_BEACON_MAX_FRAGMENTS 10
+/// DS Download Play splits its game information record in 9 blocks, and follows
+/// them with one block per group of four players describing who is in the room.
+/// A room of the maximum size needs four of those, so 13 blocks in total.
+#define DSWIFI_BEACON_MAX_FRAGMENTS 13
 
 /// Layout of the "extra data" of the Nintendo vendor information element.
 ///

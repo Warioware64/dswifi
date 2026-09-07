@@ -16,7 +16,27 @@
 // back together using the index and the total stored in every fragment.
 
 static u8 dlplay_game_info[DLPLAY_GAME_INFO_SIZE];
-static u8 dlplay_fragments[DLPLAY_FRAGMENT_COUNT][DLPLAY_FRAGMENT_SIZE];
+static u8 dlplay_fragments[DSWIFI_BEACON_MAX_FRAGMENTS][DLPLAY_FRAGMENT_SIZE];
+
+// How many fragments of the table above are in use, and how many of those
+// describe the room rather than carrying a piece of the record. A room of two
+// only needs one of the latter, which is the ten fragments this has always sent.
+static int dlplay_fragment_count = DLPLAY_FIXED_FRAGMENT_COUNT + 1;
+static int dlplay_volatile_count = 1;
+
+// Number of the record being announced. Every fragment carries it, and a client
+// that sees it change throws away what it collected and starts again, which is
+// what lets the title and the icon be replaced while the host is running.
+static u8 dlplay_seq_fixed;
+
+// Who is in the room, what to say about each of them, and the eight bytes the
+// application announces alongside. The fragments that describe the room are
+// built from these, so they are kept here rather than read back out of them.
+static u16 dlplay_player_mask = DLPLAY_PLAYER_FLAG_HOST;
+static u16 dlplay_player_changed;
+static u8 dlplay_player_sequence;
+static Wifi_DlPlayMember dlplay_members[WIFI_MAX_MULTIPLAYER_CLIENTS + 1];
+static u8 dlplay_user_volat[DSWIFI_DLPLAY_USER_VOLAT_SIZE];
 
 // Copies a UTF-16LE string to the record, padding the rest with zeros.
 static void Wifi_DlPlayWriteString(u8 *dest, const u16 *src, size_t src_len,
@@ -51,7 +71,119 @@ static void Wifi_DlPlayFragmentChecksum(u8 *fragment)
     fragment[DLPLAY_FRAG_CHECKSUM + 1] = sum & 0xFF;
 }
 
-int Wifi_DlPlayBeaconSetInfo(const Wifi_DlPlayRom *rom, const Wifi_DlPlayInfo *info)
+// Hands the table over to the ARM7, which writes one fragment of it into the
+// beacon before every transmission.
+//
+// This restarts the cycle at the first fragment, so it has to be done only when
+// something has actually changed. A host that called it on every frame would
+// send the first fragment for ever and no client would collect the record.
+static int Wifi_DlPlayBeaconPublish(void)
+{
+    return Wifi_BeaconSetExtraDataFragments(dlplay_fragments, DLPLAY_FRAGMENT_SIZE,
+                                            dlplay_fragment_count);
+}
+
+// Writes one player into a slot of the list carried by a fragment.
+static void Wifi_DlPlayWriteMember(u8 *slot, int aid, const Wifi_DlPlayMember *member)
+{
+    u8 name_len = member->name_len;
+
+    if (name_len > DSWIFI_DLPLAY_HOST_NAME_LEN)
+        name_len = DSWIFI_DLPLAY_HOST_NAME_LEN;
+
+    // The player number is the association ID the client was given. It has to be
+    // there: a client stores every record it receives under the number in it,
+    // and treats a record numbered zero as an empty slot.
+    slot[DLPLAY_MEMBER_OFS_COLOR] = (member->favorite_color & 0x0F) | (aid << 4);
+    slot[DLPLAY_MEMBER_OFS_NAME_LEN] = name_len;
+
+    Wifi_DlPlayWriteString(slot + DLPLAY_MEMBER_OFS_NAME, member->name, name_len,
+                           DSWIFI_DLPLAY_HOST_NAME_LEN);
+}
+
+// Rebuilds every fragment that describes the room from the state above.
+//
+// Only four players fit in a fragment, so a room bigger than that is described
+// by several of them. They are identical apart from the players they carry: a
+// client tells one announcement from the next by the sequence number, and would
+// throw away the players it had collected if the fragments of one announcement
+// disagreed about it.
+static void Wifi_DlPlayWriteVolatileFragments(void)
+{
+    u8 count = 0;
+
+    for (int i = 0; i < 16; i++)
+    {
+        if (dlplay_player_mask & (1 << i))
+            count++;
+    }
+
+    for (int v = 0; v < dlplay_volatile_count; v++)
+    {
+        u8 *fragment = dlplay_fragments[DLPLAY_FIXED_FRAGMENT_COUNT + v];
+
+        memset(fragment, 0, DLPLAY_FRAGMENT_SIZE);
+
+        // Every fragment is numbered, and a client drops a host that sends the
+        // same number over and over, so these carry on from the record.
+        fragment[DLPLAY_FRAG_INDEX] = DLPLAY_FIXED_FRAGMENT_COUNT + v;
+        fragment[DLPLAY_FRAG_SEQ_FIXED] = dlplay_seq_fixed;
+        fragment[DLPLAY_FRAG_TOTAL] = DLPLAY_FIXED_FRAGMENT_COUNT;
+
+        // This fragment isn't part of the record. It describes who is in the
+        // game, so the fields after the checksum mean something else: a count of
+        // players, a bitmap of which ones are present, and a bitmap of which
+        // ones changed since the last announcement.
+        fragment[DLPLAY_FRAG_SEQUENCE_END] = 2;
+        fragment[DLPLAY_FRAG_CONNECTED] = dlplay_player_sequence;
+
+        fragment[DLPLAY_FRAG_PLAYER_COUNT] = count;
+        fragment[DLPLAY_FRAG_PLAYER_FLAGS + 0] = dlplay_player_mask & 0xFF;
+        fragment[DLPLAY_FRAG_PLAYER_FLAGS + 1] = (dlplay_player_mask >> 8) & 0xFF;
+        fragment[DLPLAY_FRAG_PLAYER_CHANGED + 0] = dlplay_player_changed & 0xFF;
+        fragment[DLPLAY_FRAG_PLAYER_CHANGED + 1] = (dlplay_player_changed >> 8) & 0xFF;
+
+        // The players themselves, four to a fragment in order of association ID.
+        // The host isn't one of them: it is described by the record instead, and
+        // a client counts it as present without being told.
+        int index = 0;
+
+        for (int aid = 1; aid <= WIFI_MAX_MULTIPLAYER_CLIENTS; aid++)
+        {
+            if ((dlplay_player_mask & (1 << aid)) == 0)
+                continue;
+
+            int slot = index - (v * DLPLAY_MEMBERS_PER_FRAGMENT);
+
+            index++;
+
+            if ((slot < 0) || (slot >= DLPLAY_MEMBERS_PER_FRAGMENT))
+                continue;
+
+            Wifi_DlPlayWriteMember(
+                fragment + DLPLAY_FRAG_MEMBERS + (slot * DLPLAY_MEMBER_SIZE),
+                aid, &dlplay_members[aid]);
+        }
+
+        memcpy(fragment + DLPLAY_FRAG_USER_VOLAT, dlplay_user_volat,
+               DSWIFI_DLPLAY_USER_VOLAT_SIZE);
+
+        Wifi_DlPlayFragmentChecksum(fragment);
+    }
+}
+
+void Wifi_DlPlayBeaconResetPlayers(void)
+{
+    dlplay_player_mask = DLPLAY_PLAYER_FLAG_HOST;
+    dlplay_player_changed = 0;
+    dlplay_player_sequence = 0;
+
+    memset(dlplay_members, 0, sizeof(dlplay_members));
+    memset(dlplay_user_volat, 0, sizeof(dlplay_user_volat));
+}
+
+int Wifi_DlPlayBeaconSetInfo(const Wifi_DlPlayRom *rom, const Wifi_DlPlayInfo *info,
+                             u8 max_clients)
 {
     const u8 *icon_bitmap = NULL;
     const u8 *icon_palette = NULL;
@@ -132,18 +264,15 @@ int Wifi_DlPlayBeaconSetInfo(const Wifi_DlPlayRom *rom, const Wifi_DlPlayInfo *i
     dlplay_game_info[DLPLAY_INFO_HOST_PLAYER] =
         (PersonalData->theme & 0x0F) | (0 << 4);
 
-    // How many players the program on offer supports, counting the host. It is
-    // what a client shows next to the title, and says nothing about how many
-    // consoles this host serves at once, which is one.
+    // How many players the program on offer supports, counting the host. This is
+    // the size of the room the caller asked for, already clamped by
+    // Wifi_DlPlayPickFrameSize(), so that what a client is shown next to the
+    // title matches the number of consoles this host will actually take.
     //
-    // Announcing 1 would tell clients the game is full before anyone joined, so
-    // anything below two is treated as unset.
-    u8 max_players = (info != NULL) ? info->max_players : 0;
-
-    if ((max_players < 2) || (max_players > DSWIFI_DLPLAY_MAX_PLAYERS))
-        max_players = DLPLAY_MAX_PLAYERS;
-
-    dlplay_game_info[DLPLAY_INFO_MAX_PLAYERS] = max_players;
+    // A room that takes nobody would be announced as holding one player, which
+    // tells clients the game is full before anyone has joined.
+    dlplay_game_info[DLPLAY_INFO_MAX_PLAYERS] =
+        (max_clients < 1) ? DLPLAY_MAX_PLAYERS : (max_clients + 1);
 
     // Title and description. If the caller doesn't provide them they are taken
     // from the banner of the ROM, the same place the icon comes from. The banner
@@ -200,9 +329,20 @@ int Wifi_DlPlayBeaconSetInfo(const Wifi_DlPlayRom *rom, const Wifi_DlPlayInfo *i
     // Split the record in fragments
     // -----------------------------
 
+    // Room for the record, then one fragment per group of four players. A client
+    // only treats the game information as complete once it holds a record for
+    // every player announced, so the whole room has to fit in one pass of the
+    // table -- there is no way to rotate a window over it, because handing the
+    // ARM7 a new table is what restarts the pass.
+    dlplay_volatile_count = DLPLAY_VOLATILE_FRAGMENT_COUNT(max_clients);
+    dlplay_fragment_count = DLPLAY_FIXED_FRAGMENT_COUNT + dlplay_volatile_count;
+
+    // Tell clients that already collected the previous record to read this one.
+    dlplay_seq_fixed++;
+
     memset(dlplay_fragments, 0, sizeof(dlplay_fragments));
 
-    for (int i = 0; i < DLPLAY_FRAGMENT_COUNT; i++)
+    for (int i = 0; i < DLPLAY_FIXED_FRAGMENT_COUNT; i++)
     {
         u8 *fragment = dlplay_fragments[i];
 
@@ -214,51 +354,40 @@ int Wifi_DlPlayBeaconSetInfo(const Wifi_DlPlayRom *rom, const Wifi_DlPlayInfo *i
         // collected.
 
         fragment[DLPLAY_FRAG_INDEX] = i;
+        fragment[DLPLAY_FRAG_SEQ_FIXED] = dlplay_seq_fixed;
 
-        // Which fragment is the last one. Every fragment carries it, the volatile
-        // one included: this used to be left at zero there, so a client reading
-        // that fragment was told there were none to collect.
-        fragment[DLPLAY_FRAG_TOTAL] = DLPLAY_FRAGMENT_COUNT - 1;
+        // How many fragments the record is split into. Every fragment carries
+        // it, the ones that describe the room included: this used to be left at
+        // zero there, so a client reading one of those was told there were none
+        // to collect.
+        fragment[DLPLAY_FRAG_TOTAL] = DLPLAY_FIXED_FRAGMENT_COUNT;
 
-        if (i == (DLPLAY_FRAGMENT_COUNT - 1))
-        {
-            // The last fragment isn't part of the record. It describes who is in
-            // the game, so the fields after the checksum mean something else: a
-            // count of players, then a bitmap of which ones are present.
-            fragment[DLPLAY_FRAG_SEQUENCE_END] = 2;
+        fragment[DLPLAY_FRAG_INDEX2] = i;
 
-            // The count includes the host, which is playing on its own until a
-            // client turns up. Wifi_DlPlayBeaconSetPlayers() keeps both fields
-            // up to date after that.
-            fragment[DLPLAY_FRAG_PLAYER_COUNT] = 1;
-            fragment[DLPLAY_FRAG_PLAYER_FLAGS] = DLPLAY_PLAYER_FLAG_HOST;
-            fragment[DLPLAY_FRAG_PLAYER_FLAGS + 1] = 0;
-        }
-        else
-        {
-            fragment[DLPLAY_FRAG_INDEX2] = i;
+        // The record doesn't divide evenly between the fragments, so the last
+        // one carries less data than the rest.
+        size_t offset = (size_t)i * DLPLAY_FRAG_PAYLOAD_MAX;
+        size_t len = DLPLAY_FRAG_PAYLOAD_MAX;
 
-            // The record doesn't divide evenly between the fragments, so the
-            // last one carries less data than the rest.
-            size_t offset = (size_t)i * DLPLAY_FRAG_PAYLOAD_MAX;
-            size_t len = DLPLAY_FRAG_PAYLOAD_MAX;
+        if (offset >= DLPLAY_GAME_INFO_SIZE)
+            len = 0;
+        else if ((offset + len) > DLPLAY_GAME_INFO_SIZE)
+            len = DLPLAY_GAME_INFO_SIZE - offset;
 
-            if (offset >= DLPLAY_GAME_INFO_SIZE)
-                len = 0;
-            else if ((offset + len) > DLPLAY_GAME_INFO_SIZE)
-                len = DLPLAY_GAME_INFO_SIZE - offset;
+        fragment[DLPLAY_FRAG_PAYLOAD_LEN] = len;
 
-            fragment[DLPLAY_FRAG_PAYLOAD_LEN] = len;
-
-            if (len > 0)
-                memcpy(fragment + DLPLAY_FRAG_PAYLOAD, dlplay_game_info + offset, len);
-        }
+        if (len > 0)
+            memcpy(fragment + DLPLAY_FRAG_PAYLOAD, dlplay_game_info + offset, len);
 
         Wifi_DlPlayFragmentChecksum(fragment);
     }
 
-    return Wifi_BeaconSetExtraDataFragments(dlplay_fragments, DLPLAY_FRAGMENT_SIZE,
-                                            DLPLAY_FRAGMENT_COUNT);
+    // The room is described from whatever is already known about it, so that
+    // replacing the record while the host is running doesn't announce an empty
+    // room to everyone who is in it.
+    Wifi_DlPlayWriteVolatileFragments();
+
+    return Wifi_DlPlayBeaconPublish();
 }
 
 const void *Wifi_DlPlayBeaconGetFirstFragment(void)
@@ -266,47 +395,75 @@ const void *Wifi_DlPlayBeaconGetFirstFragment(void)
     return dlplay_fragments[0];
 }
 
-void Wifi_DlPlayBeaconSetPlayers(u16 clients)
+static bool Wifi_DlPlayMemberChanged(const Wifi_DlPlayMember *a,
+                                     const Wifi_DlPlayMember *b)
 {
-    // Number of the last announcement. Clients watch it to notice that the list
-    // of players has changed, so it has to move whenever the list does.
-    static u8 sequence = 0;
+    if ((a->favorite_color != b->favorite_color) || (a->name_len != b->name_len))
+        return true;
 
-    u8 *fragment = dlplay_fragments[DLPLAY_FRAGMENT_COUNT - 1];
+    return memcmp(a->name, b->name, sizeof(a->name)) != 0;
+}
 
+void Wifi_DlPlayBeaconSetPlayers(u16 clients, const Wifi_DlPlayMember *members)
+{
     // Bit 0 is the host, which is always playing.
     u16 now = clients | DLPLAY_PLAYER_FLAG_HOST;
 
-    u16 previous = (u16)(fragment[DLPLAY_FRAG_PLAYER_FLAGS]
-                       | (fragment[DLPLAY_FRAG_PLAYER_FLAGS + 1] << 8));
+    // Say nothing when there is nothing to say. Every announcement restarts the
+    // cycle of fragments, so one made on every frame would stop the record from
+    // ever reaching a client.
+    //
+    // The names are part of this: a client turns up before it has said who it
+    // is, so it joins the room in one announcement and is described in the next.
+    bool changed = (now != dlplay_player_mask);
 
-    if (now == previous)
-        return;
-
-    u8 count = 0;
-    for (int i = 0; i < 16; i++)
+    for (int aid = 1; (aid <= WIFI_MAX_MULTIPLAYER_CLIENTS) && !changed; aid++)
     {
-        if (now & (1 << i))
-            count++;
+        if ((now & (1 << aid)) == 0)
+            continue;
+
+        changed = Wifi_DlPlayMemberChanged(&dlplay_members[aid], &members[aid]);
     }
 
-    fragment[DLPLAY_FRAG_CONNECTED] = ++sequence;
+    if (!changed)
+        return;
 
-    fragment[DLPLAY_FRAG_PLAYER_COUNT] = count;
-    fragment[DLPLAY_FRAG_PLAYER_FLAGS + 0] = now & 0xFF;
-    fragment[DLPLAY_FRAG_PLAYER_FLAGS + 1] = (now >> 8) & 0xFF;
+    // Which of them changed since the last announcement. A client uses this to
+    // work out which of the players it had collected to forget, so it is the
+    // difference in the list rather than in the names.
+    dlplay_player_changed = now ^ dlplay_player_mask;
+    dlplay_player_mask = now;
 
-    // Which of them changed since the last announcement.
-    u16 changed = now ^ previous;
+    // Number of the announcement. Clients watch it to notice that the list of
+    // players has changed, so it has to move whenever the list does.
+    dlplay_player_sequence++;
 
-    fragment[DLPLAY_FRAG_PLAYER_CHANGED + 0] = changed & 0xFF;
-    fragment[DLPLAY_FRAG_PLAYER_CHANGED + 1] = (changed >> 8) & 0xFF;
+    for (int aid = 1; aid <= WIFI_MAX_MULTIPLAYER_CLIENTS; aid++)
+        dlplay_members[aid] = members[aid];
 
-    // These fields are inside the part of the fragment that the checksum covers,
-    // so it has to be worked out again and the whole table handed to the ARM7
-    // once more. Patching bytes in place isn't enough here.
-    Wifi_DlPlayFragmentChecksum(fragment);
+    Wifi_DlPlayWriteVolatileFragments();
+    Wifi_DlPlayBeaconPublish();
+}
 
-    Wifi_BeaconSetExtraDataFragments(dlplay_fragments, DLPLAY_FRAGMENT_SIZE,
-                                     DLPLAY_FRAGMENT_COUNT);
+int Wifi_DlPlayBeaconSetUserVolatData(const void *data)
+{
+    u8 next[DSWIFI_DLPLAY_USER_VOLAT_SIZE];
+
+    if (data != NULL)
+        memcpy(next, data, sizeof(next));
+    else
+        memset(next, 0, sizeof(next));
+
+    // Unlike the list of players this carries no sequence number, because a
+    // client takes it from every announcement it receives rather than collecting
+    // it. That also means there is nothing to bump here, only the fragments to
+    // write again -- and nothing to write when the bytes are the same.
+    if (memcmp(next, dlplay_user_volat, sizeof(next)) == 0)
+        return 0;
+
+    memcpy(dlplay_user_volat, next, sizeof(next));
+
+    Wifi_DlPlayWriteVolatileFragments();
+
+    return Wifi_DlPlayBeaconPublish();
 }

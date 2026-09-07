@@ -42,7 +42,7 @@
 // So the ARM9 writes this in and the ARM7 checks it before touching anything
 // else. Change it whenever the layout of Wifi_MainStruct or the MAC RAM map
 // changes, which is the only thing that makes an old core wrong.
-#define WIFI_SHARED_ABI     1
+#define WIFI_SHARED_ABI     2
 
 // Flags that inform us of the state of the ARM7
 #define WFLAG_ARM7_ACTIVE  0x0001

@@ -1629,6 +1629,39 @@ int main(int argc, char *argv[])
             }
         }
 
+        // What the beacon says about the room, which is what a console that is
+        // only looking at it sees. A client joins the list once it has said who
+        // it is, and is announced with the name and the colour its owner set in
+        // the console settings.
+        int announced = 1; // The host is always in its own room
+
+        for (int aid = 1; aid <= 15; aid++)
+        {
+            const Wifi_DlPlayClientRequest *request =
+                Wifi_DlPlayGetClientRequestByAID(aid);
+
+            if ((request == NULL) || !request->valid)
+                continue;
+
+            announced++;
+        }
+
+        printf("Room:    %d announced\n", announced);
+
+        for (int aid = 1; aid <= 15; aid++)
+        {
+            const Wifi_DlPlayClientRequest *request =
+                Wifi_DlPlayGetClientRequestByAID(aid);
+
+            if ((request == NULL) || !request->valid)
+                continue;
+
+            const char *name = Wifi_DlPlayGetClientNameByAID(aid);
+
+            printf("  p%-2d %-10.10s colour %2d\n", aid,
+                   (name != NULL) ? name : "?", request->favorite_color);
+        }
+
         if (state == WIFI_DLPLAY_SENDING)
             printf("Stream:  block %d / %d\n", current, total);
 

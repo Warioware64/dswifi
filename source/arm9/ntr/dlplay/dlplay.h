@@ -117,9 +117,20 @@
 #define DLPLAY_BEACON_TYPE_IDLE     0x0B
 
 // Size in bytes of each of the blocks that the game information record is split
-// in, and the number of them.
+// in, and how many of them carry a piece of the record.
+//
+// The blocks after those don't carry the record. Each one describes up to four
+// of the players in the room, so a room only needs more than one of them when
+// more than four consoles can be in it at once. They are counted separately
+// because the total varies with the size of the room while this doesn't.
 #define DLPLAY_FRAGMENT_SIZE        0x70
-#define DLPLAY_FRAGMENT_COUNT       10
+#define DLPLAY_FIXED_FRAGMENT_COUNT 9
+
+// Number of blocks needed to describe a room that holds "clients" clients
+// besides the host. There is always at least one, because a room with nobody in
+// it still has to announce the host.
+#define DLPLAY_VOLATILE_FRAGMENT_COUNT(clients) \
+    (((clients) < 1) ? 1 : ((((clients) - 1) / DLPLAY_MEMBERS_PER_FRAGMENT) + 1))
 
 // Size in bytes of the SSID announced by DS Download Play hosts.
 #define DLPLAY_SSID_SIZE            32
@@ -155,11 +166,39 @@
 #define DLPLAY_FRAG_PAYLOAD_LEN     0x0C
 #define DLPLAY_FRAG_PAYLOAD         0x0E
 
-// The last fragment doesn't carry a piece of the record. It reports who is in
+// Sequence number of the record. A client that has already collected the record
+// throws it away and reads it again when this changes, which is what makes the
+// announced title and icon replaceable while the host is running.
+#define DLPLAY_FRAG_SEQ_FIXED       0x05
+
+// The fragments past the record don't carry a piece of it. They report who is in
 // the game instead, so the fields after the checksum have different meanings.
 #define DLPLAY_FRAG_PLAYER_COUNT    0x0A
 #define DLPLAY_FRAG_PLAYER_FLAGS    0x0C
 #define DLPLAY_FRAG_PLAYER_CHANGED  0x0E
+
+// The list of players follows them: up to four records of DLPLAY_MEMBER_SIZE
+// bytes each, then eight bytes the application can put anything it likes in.
+//
+// A client stores each record it receives under the player number in it and
+// notes that it has that player, and it only treats the game information as
+// complete once it holds a record for every player named in
+// DLPLAY_FRAG_PLAYER_FLAGS. Announcing a player without sending a record for it
+// leaves the client waiting forever, which is why every fragment here is written
+// at the same time as the flags.
+#define DLPLAY_FRAG_MEMBERS         0x10
+#define DLPLAY_FRAG_USER_VOLAT      0x68
+
+#define DLPLAY_MEMBERS_PER_FRAGMENT 4
+#define DLPLAY_MEMBER_SIZE          22
+
+// Fields of one player record. The first byte packs the colour the player picked
+// in the console settings in its low nibble and the player number in its high
+// one. A record whose player number is zero is an empty slot: the host is player
+// zero and is described by the record part instead.
+#define DLPLAY_MEMBER_OFS_COLOR     0
+#define DLPLAY_MEMBER_OFS_NAME_LEN  1
+#define DLPLAY_MEMBER_OFS_NAME      2
 
 // Bit of DLPLAY_FRAG_PLAYER_FLAGS that stands for the host itself. Clients look
 // at this to know who is already in the game, so leaving it clear makes the host
@@ -219,8 +258,13 @@
 //
 #define DLPLAY_STATION_SEND_DELAY   2
 
-// How many chunks to queue per update.
-//
+// How many content chunks to queue per station serve. Must stay 1: the chunks
+// are PUSHED, not requested one by one, and the retail Download Station client
+// expects to take one per exchange and reply before the next. Queuing several
+// back to back (this was tried at 4) overruns it and it drops with "connection
+// to the Download Station has been lost". Serving every client once per update
+// (see the bulk rotation) is the safe way to go faster with more than one
+// console; a single console is paced by the client at one chunk per update.
 #define DLPLAY_STATION_PER_UPDATE   1
 
 #define DLPLAY_FLAGS_HAS_FOOTER     (1 << 4)
@@ -369,17 +413,53 @@ const u8 *Wifi_DlPlayRomGetBlock(const Wifi_DlPlayRom *rom, int block, size_t *s
 
 // Builds the game information record announced in beacon frames, splits it in
 // fragments and hands them over to the ARM7. It returns 0 on success.
-int Wifi_DlPlayBeaconSetInfo(const Wifi_DlPlayRom *rom, const Wifi_DlPlayInfo *info);
+//
+// "max_clients" is how many consoles the room takes besides the host. It decides
+// both the number of players announced next to the title and how many fragments
+// are needed to describe them, so it is the value the room was really set up
+// with rather than the one in "info".
+//
+// Whoever is in the room stays announced, so this can be called again while the
+// host is running to replace what it offers. Call Wifi_DlPlayBeaconResetPlayers()
+// first when starting a new host.
+int Wifi_DlPlayBeaconSetInfo(const Wifi_DlPlayRom *rom, const Wifi_DlPlayInfo *info,
+                             u8 max_clients);
+
+// Forgets who was in the room, so that a host that starts again doesn't announce
+// the players of the one before it.
+void Wifi_DlPlayBeaconResetPlayers(void);
 
 // Returns the first fragment of the game information record, which is the one
 // stored in the beacon frame when it is created.
 const void *Wifi_DlPlayBeaconGetFirstFragment(void);
 
+// One of the players announced in beacon frames. The host isn't described by one
+// of these: it is part of the game information record instead.
+typedef struct {
+    // Colour the player picked in the console settings, 0 to 15.
+    u8 favorite_color;
+    // Length in characters of the name, up to DSWIFI_DLPLAY_HOST_NAME_LEN.
+    u8 name_len;
+    // Name of the player, in UTF-16LE.
+    u16 name[DSWIFI_DLPLAY_HOST_NAME_LEN];
+} Wifi_DlPlayMember;
+
 // Announces who is in the game. "clients" is a mask of the association IDs of
-// the clients that are connected, with bit 0 standing for the host.
+// the clients that are connected, with bit 0 standing for the host, and
+// "members" describes them, indexed by association ID. Entries whose bit isn't
+// set in the mask are ignored.
 //
 // A client looks for itself in this list before it carries on, so it has to be
-// updated as clients come and go.
-void Wifi_DlPlayBeaconSetPlayers(u16 clients);
+// updated as clients come and go. Every client in the mask must have a name and
+// a colour here: a client that is announced without them is one the console
+// scanning this host waits for forever.
+//
+// Nothing is sent when neither the mask nor the names have changed, which
+// matters because every call that does send restarts the cycle of fragments.
+void Wifi_DlPlayBeaconSetPlayers(u16 clients, const Wifi_DlPlayMember *members);
+
+// Sets the eight bytes of application data carried next to the list of players.
+// Passing NULL clears them. It returns 0 on success.
+int Wifi_DlPlayBeaconSetUserVolatData(const void *data);
 
 #endif // DSWIFI_ARM9_NTR_DLPLAY_H__
