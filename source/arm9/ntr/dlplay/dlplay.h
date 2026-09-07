@@ -364,7 +364,20 @@
 // cycle and uses 2; this host queues DLPLAY_BLOCKS_PER_UPDATE at a time, and a
 // window smaller than that would order a block resent before the client had a
 // chance to answer for it.
-#define DLPLAY_BLOCKS_PER_UPDATE    3
+//
+// Four rather than three. A cycle at the announced size takes a little under
+// three milliseconds, so four is about twelve of the sixteen and a half in a
+// video frame and still leaves room for the reply slots; five does not.
+//
+// It is also the number of frames one update can spend, and since the update
+// now serves each client's own request before streaming ahead (see
+// Wifi_DlPlaySendNextBlock), it is what decides how many consoles can be served
+// at once before they start taking turns.
+//
+// This is the number to back off if transfers start failing on hardware: too
+// many frames back to back overruns a client, which shows up as a transfer that
+// dies part way rather than as anything diagnosable.
+#define DLPLAY_BLOCKS_PER_UPDATE    4
 #define DLPLAY_SEND_THRESHOLD       (DLPLAY_BLOCKS_PER_UPDATE + 2)
 
 // Parts of the ROM that are sent to the client, in the order they are sent. The

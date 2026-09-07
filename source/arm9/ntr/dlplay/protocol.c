@@ -1093,13 +1093,62 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
     bool requested = dlplay_block_requested;
     int next = 0;
 
-    for (int aid = 1; aid <= WIFI_MAX_MULTIPLAYER_CLIENTS; aid++)
+    // Every distinct block the clients are asking for, not just the highest.
+    //
+    // The highest alone is what the stream cursor follows, and on its own it
+    // starves everybody who is not the console furthest along: once one client
+    // is even slightly ahead the cursor is its cursor, and a second client only
+    // ever receives what the leader has not had yet. The second console still
+    // shows progress, because it keeps anything useful that goes past, but the
+    // blocks it actually asked for are never sent until the leader stops asking
+    // -- so it collects holes for the whole transfer and then crawls through
+    // them one per cycle at the end. Two consoles side by side, one fast and one
+    // slow, is exactly that.
+    //
+    // So the requests are served first and the cursor fills what is left. A
+    // client is free to be sent a block far behind the cursor: it stores blocks
+    // by number and keeps any it is missing.
+    int wanted[DLPLAY_BLOCKS_PER_UPDATE];
+    int wanted_count = 0;
+
+    // Where to start looking for requests to serve. There can be more clients
+    // wanting different blocks than there are frames in an update, and always
+    // walking from association ID 1 would serve the same few every time and
+    // never the rest. Moving the start on by one each update shares the slots
+    // out. It plays no part in the maximum below, which is over all of them.
+    static u8 rotate = 0;
+
+    rotate++;
+
+    for (int i = 0; i < WIFI_MAX_MULTIPLAYER_CLIENTS; i++)
     {
+        int aid = 1 + ((rotate + i) % WIFI_MAX_MULTIPLAYER_CLIENTS);
+
         const Wifi_DlPlayClient *client = &dlplay_clients[aid];
 
-        if ((client->stage == DLPLAY_PSTATE_SEND_PROCEED)
-            && (client->next_block > next))
+        if (client->stage != DLPLAY_PSTATE_SEND_PROCEED)
+            continue;
+
+        if (client->next_block > next)
             next = client->next_block;
+
+        if (client->next_block >= dlplay_rom.total_blocks)
+            continue;
+
+        // Clients in step ask for the same block, which is the ordinary case and
+        // must cost one slot rather than one each.
+        bool seen = false;
+        for (int w = 0; w < wanted_count; w++)
+        {
+            if (wanted[w] == client->next_block)
+            {
+                seen = true;
+                break;
+            }
+        }
+
+        if (!seen && (wanted_count < DLPLAY_BLOCKS_PER_UPDATE))
+            wanted[wanted_count++] = client->next_block;
     }
 
     dlplay_block_requested = false;
@@ -1113,10 +1162,10 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
     // was either received, in which case they say so and the cursor moves on
     // again, or lost, in which case it has to be sent again anyway.
     //
-    // "What the clients asked for" is one number for all of them: they take the
-    // same stream and each keeps the blocks it is missing, so the cursor follows
-    // whichever of them is furthest along and the ones behind pick up the rest as
-    // it comes round. That is MBi_calc_sendblock() in mb_parent.c.
+    // The cursor still follows whichever client is furthest along, which is
+    // MBi_calc_sendblock() in mb_parent.c. What has changed is that it is no
+    // longer the only thing sent: it streams ahead for the leader while the
+    // block list above keeps everyone else moving.
     if (requested)
     {
         if ((dlplay_block < next) || (dlplay_block > (next + DLPLAY_SEND_THRESHOLD)))
@@ -1125,7 +1174,18 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
 
     int sent = 0;
 
-    for (int i = 0; i < DLPLAY_BLOCKS_PER_UPDATE; i++)
+    // What the clients asked for, one frame each. With every console in step
+    // this is a single block and the stream below is untouched; with them apart
+    // it is what stops the ones behind from waiting for the leader to finish.
+    for (int i = 0; i < wanted_count; i++)
+    {
+        if (!Wifi_DlPlaySendBlock(wanted[i], dest, file_id))
+            break;
+
+        sent++;
+    }
+
+    for (int i = sent; i < DLPLAY_BLOCKS_PER_UPDATE; i++)
     {
         // Never get further ahead than a client can ask the host to come back
         // from. Past the end of the program there is nothing to send either.
@@ -1138,6 +1198,24 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
         // newcomer wants, and the cursor follows it back.
         if (dlplay_block >= dlplay_rom.total_blocks)
             break;
+
+        // Already sent by the pass above, so skip it rather than spend a frame
+        // saying the same thing twice.
+        bool duplicate = false;
+        for (int j = 0; j < wanted_count; j++)
+        {
+            if (wanted[j] == dlplay_block)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if (duplicate)
+        {
+            dlplay_block++;
+            continue;
+        }
 
         // The transmit ring is full. Stop rather than dropping frames: the ARM7
         // is already behind, and what isn't sent now goes out on the next pass.
