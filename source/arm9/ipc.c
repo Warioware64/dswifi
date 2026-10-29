@@ -557,6 +557,20 @@ void Wifi_MultiplayerHostName(const void *buffer, u8 len)
     memcpy((void *)WifiData->hostPlayerName, buffer, DSWIFI_BEACON_NAME_SIZE);
 }
 
+int Wifi_MultiplayerHostGameData(const void *data, size_t size)
+{
+    if (size > DSWIFI_BEACON_GAME_DATA_MAX)
+        return -1;
+    if ((size > 0) && (data == NULL))
+        return -1;
+
+    WifiData->hostGameDataLen = size;
+    if (size > 0)
+        memcpy((void *)WifiData->hostGameData, data, size);
+
+    return 0;
+}
+
 void Wifi_MultiplayerKickClientByAID(int association_id)
 {
     if ((association_id < 1) || (association_id > WIFI_MAX_MULTIPLAYER_CLIENTS))

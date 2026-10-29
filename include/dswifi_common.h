@@ -27,6 +27,10 @@ extern "C" {
 /// Size in bytes reserved in beacon frames for the multiplayer host player name.
 #define DSWIFI_BEACON_NAME_SIZE 20
 
+/// Size of the game data a DSWifi host may add to its beacon frames, after
+/// the player name (see Wifi_MultiplayerHostGameData()).
+#define DSWIFI_BEACON_GAME_DATA_MAX 16
+
 /// Biggest "extra data" block that can be stored in the Nintendo vendor
 /// information element of a beacon frame.
 ///
@@ -248,6 +252,12 @@ typedef struct {
     /// the contents by using Wifi_MultiplayerHostName() so that clients can
     /// see it. By default, this is the player name stored in the DS firmware.
     u16 name[DSWIFI_BEACON_NAME_SIZE / sizeof(u16)];
+    /// Number of valid bytes in "game_data" (0 if the host didn't send any,
+    /// like hosts of older versions of DSWifi).
+    u8 game_data_len;
+    /// Data that the host has defined with Wifi_MultiplayerHostGameData(), so
+    /// that clients can show what the game is about before joining it.
+    u8 game_data[DSWIFI_BEACON_GAME_DATA_MAX];
 } Wifi_NintendoVendorInfo;
 
 /// Structure that defines information about an Access Point.

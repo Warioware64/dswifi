@@ -321,6 +321,10 @@ typedef struct WIFI_MAINSTRUCT
     u16 hostPlayerName[10]; // UTF-16LE
     u8 hostPlayerNameLen;
 
+    // Game data sent in beacons after the player name
+    u8 hostGameData[DSWIFI_BEACON_GAME_DATA_MAX];
+    u8 hostGameDataLen;
+
     // Beacon vendor information element (NTR multiplayer host mode)
     // ------------------------------------------------------------
 

@@ -4,6 +4,7 @@
 // Copyright (C) 2025 Antonio Niño Díaz
 
 #include <limits.h>
+#include <string.h>
 
 #include "arm7/access_point.h"
 #include "arm7/debug.h"
@@ -125,6 +126,18 @@ static void Wifi_ProcessVendorTag(u8 *data, size_t len, bool *has_nintendo_info,
                           | (extra->name[(i * 2) + 1] << 8);
         }
 
+        // The game data of the host, if it sent any (in the element and in what
+        // it says the extra data is).
+        size_t game_data_len = 0;
+        if (hdr->extra_data_size > sizeof(DSWifiExtraData))
+            game_data_len = hdr->extra_data_size - sizeof(DSWifiExtraData);
+        if (len < sizeof(FieVendorNintendoHeader) + sizeof(DSWifiExtraData) + game_data_len)
+            game_data_len = 0;
+        if (game_data_len > DSWIFI_BEACON_GAME_DATA_MAX)
+            game_data_len = DSWIFI_BEACON_GAME_DATA_MAX;
+        info->game_data_len = game_data_len;
+        memcpy(info->game_data, (const u8 *)extra + sizeof(DSWifiExtraData), game_data_len);
+
         return;
     }
 }
@@ -148,6 +161,7 @@ void Wifi_ProcessBeaconOrProbeResponse(Wifi_RxHeader *packetheader, int macbase)
     Wifi_ApSecurityType sec_type = AP_SECURITY_OPEN;
 
     Wifi_NintendoVendorInfo nintendo_info;
+    memset(&nintendo_info, 0, sizeof(nintendo_info));
     bool has_nintendo_info = false;
 
     // Capability info, WEP bit. It goes after the 8 byte timestamp and the 2

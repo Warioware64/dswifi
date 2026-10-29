@@ -289,6 +289,9 @@ int Wifi_BeaconStartRawSsid(const void *ssid, size_t ssid_len,
 
 int Wifi_BeaconStart(const char *ssid, u32 game_id)
 {
+    // The extra data of DSWifi, then the game data of the host, if any. Clients
+    // of older versions only look at the first part.
+    u8 buffer[sizeof(DSWifiExtraData) + DSWIFI_BEACON_GAME_DATA_MAX];
     DSWifiExtraData extra;
 
     memset(&extra, 0, sizeof(extra));
@@ -304,6 +307,12 @@ int Wifi_BeaconStart(const char *ssid, u32 game_id)
         extra.name[(i * 2) + 1] = (WifiData->hostPlayerName[i] >> 8) & 0xFF;
     }
 
+    size_t game_data_len = WifiData->hostGameDataLen;
+    if (game_data_len > DSWIFI_BEACON_GAME_DATA_MAX)
+        game_data_len = DSWIFI_BEACON_GAME_DATA_MAX;
+    memcpy(buffer, &extra, sizeof(extra));
+    memcpy(buffer + sizeof(extra), (const void *)WifiData->hostGameData, game_data_len);
+
     Wifi_BeaconVendorInfo info =
     {
         // DSWifi has always stored the game ID in the beacon in big endian
@@ -315,8 +324,8 @@ int Wifi_BeaconStart(const char *ssid, u32 game_id)
         // the sizes of the data that the user can send in them.
         .cmd_data_size = WifiData->curCmdDataSize,
         .reply_data_size = WifiData->curReplyDataSize,
-        .extra_data = &extra,
-        .extra_data_size = sizeof(DSWifiExtraData),
+        .extra_data = buffer,
+        .extra_data_size = sizeof(DSWifiExtraData) + game_data_len,
         .extra_data_layout = DSWIFI_BEACON_LAYOUT_DSWIFI,
     };
 

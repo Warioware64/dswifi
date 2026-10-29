@@ -538,6 +538,26 @@ void Wifi_MultiplayerAllowNewClients(bool allow);
 ///     Value to be copied to the "name_len" field of the beacon packet.
 void Wifi_MultiplayerHostName(const void *buffer, u8 len);
 
+/// Sets game-specific data that is added to beacon frames after the player name.
+///
+/// DSWifi doesn't use this information in any way. Clients find it in the
+/// "game_data" field of Wifi_NintendoVendorInfo when they scan, so a host can
+/// tell them what game it is offering (a mode, a map...) before they join it.
+/// Clients of older versions of DSWifi ignore it.
+///
+/// As with Wifi_MultiplayerHostName(), you need to call this before calling
+/// Wifi_BeaconStart(). To change the data of a host that has already started
+/// its beacon, call Wifi_BeaconStart() again afterwards.
+///
+/// @param data
+///     Data to send. It may be NULL if size is 0.
+/// @param size
+///     Size of the data, up to DSWIFI_BEACON_GAME_DATA_MAX bytes.
+///
+/// @return
+///     0 on success, a negative value on error.
+int Wifi_MultiplayerHostGameData(const void *data, size_t size);
+
 /// Sends a beacon frame to the ARM7 to be used in multiplayer host mode.
 ///
 /// This beacon frame announces that this console is acting as an access point
