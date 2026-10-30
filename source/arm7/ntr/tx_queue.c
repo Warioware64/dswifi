@@ -322,6 +322,8 @@ static int Wifi_TxArm9QueueFlushByCmd(void)
     return 1;
 }
 
+int Wifi_TxArm9QueueFlush(void); // (below)
+
 void Wifi_Intr_MultiplayCmdDone(void)
 {
     // Check if the packet failed to be sent and retry if so, up to the limit of
@@ -350,8 +352,21 @@ void Wifi_Intr_MultiplayCmdDone(void)
             W_MACMEM(MAC_CMDBUF_START_OFFSET + HDR_TX_STATUS) = 0;
             WifiData->mpCmdRetry++;
             Wifi_TxArm9QueueFlushByCmd();
+            return;
         }
     }
+
+    // The exchange is over: answered, or retried as often as it may be. The
+    // next frame the ARM9 has queued goes now, back to back, instead of at
+    // the next transmit-complete interrupt or the next Wifi_Update() -- which
+    // held a host sending several CMD frames a video frame (Download Play's
+    // blocks, a game's streams) to one or two of them. The CMD buffer may be
+    // written again here: the retry above does just that. Not while a
+    // regular frame is going out, nor ahead of the ARM7's own: those go
+    // first, as Wifi_TxAllQueueFlush() has it.
+    if (Wifi_TxLoc3IsBusy() || !Wifi_TxArm7QueueIsEmpty())
+        return;
+    Wifi_TxArm9QueueFlush();
 }
 
 static int Wifi_TxArm9QueueFlushByReply(void)

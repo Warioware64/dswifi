@@ -380,6 +380,11 @@
 #define DLPLAY_BLOCKS_PER_UPDATE    4
 #define DLPLAY_SEND_THRESHOLD       (DLPLAY_BLOCKS_PER_UPDATE + 2)
 
+// The most Wifi_DlPlaySetPace() lets either be: the first sizes the list of
+// requests one update serves.
+#define DLPLAY_BLOCKS_PER_UPDATE_MAX    8
+#define DLPLAY_SEND_THRESHOLD_MAX       256
+
 // Parts of the ROM that are sent to the client, in the order they are sent. The
 // client works out where to load each one from the boot information, so only
 // their contents travel.

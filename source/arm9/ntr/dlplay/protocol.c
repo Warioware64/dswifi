@@ -295,6 +295,13 @@ static bool dlplay_gather = false;
 // pick below.
 static bool dlplay_small_frame = false;
 
+// How many blocks one update queues, and how far ahead of what the clients
+// have asked for the stream may run (Wifi_DlPlaySetPace). The window is what
+// a transfer waits on: a client says what it has only once a frame or so, and
+// with Nintendo's six the host spends most of the time waiting for it to.
+static int dlplay_per_update = DLPLAY_BLOCKS_PER_UPDATE;
+static int dlplay_ahead = DLPLAY_SEND_THRESHOLD;
+
 // Messages to and from the programs this host has already sent.
 static Wifi_DlPlayAppHandlerFn dlplay_app_handler = NULL;
 static void *dlplay_app_arg = NULL;
@@ -1108,7 +1115,7 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
     // So the requests are served first and the cursor fills what is left. A
     // client is free to be sent a block far behind the cursor: it stores blocks
     // by number and keeps any it is missing.
-    int wanted[DLPLAY_BLOCKS_PER_UPDATE];
+    int wanted[DLPLAY_BLOCKS_PER_UPDATE_MAX];
     int wanted_count = 0;
 
     // Where to start looking for requests to serve. There can be more clients
@@ -1147,7 +1154,7 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
             }
         }
 
-        if (!seen && (wanted_count < DLPLAY_BLOCKS_PER_UPDATE))
+        if (!seen && (wanted_count < dlplay_per_update))
             wanted[wanted_count++] = client->next_block;
     }
 
@@ -1168,7 +1175,7 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
     // block list above keeps everyone else moving.
     if (requested)
     {
-        if ((dlplay_block < next) || (dlplay_block > (next + DLPLAY_SEND_THRESHOLD)))
+        if ((dlplay_block < next) || (dlplay_block > (next + dlplay_ahead)))
             dlplay_block = next;
     }
 
@@ -1185,11 +1192,11 @@ static void Wifi_DlPlaySendNextBlock(u16 dest, u8 file_id)
         sent++;
     }
 
-    for (int i = sent; i < DLPLAY_BLOCKS_PER_UPDATE; i++)
+    for (int i = sent; i < dlplay_per_update; i++)
     {
         // Never get further ahead than a client can ask the host to come back
         // from. Past the end of the program there is nothing to send either.
-        if (dlplay_block > (next + DLPLAY_SEND_THRESHOLD))
+        if (dlplay_block > (next + dlplay_ahead))
             break;
 
         // Past the end there is nothing to send. A console admitted part way
@@ -2391,6 +2398,24 @@ void Wifi_DlPlaySetGather(bool gather)
 void Wifi_DlPlaySetSmallFrame(bool small)
 {
     dlplay_small_frame = small;
+}
+
+void Wifi_DlPlaySetPace(int per_update, int ahead)
+{
+    if (per_update < 1)
+        per_update = 1;
+    if (per_update > DLPLAY_BLOCKS_PER_UPDATE_MAX)
+        per_update = DLPLAY_BLOCKS_PER_UPDATE_MAX;
+    // (It has to cover what is in flight: an update's worth and two more.)
+    if (ahead < per_update + 2)
+        ahead = per_update + 2;
+    if (ahead > DLPLAY_SEND_THRESHOLD_MAX)
+        ahead = DLPLAY_SEND_THRESHOLD_MAX;
+
+    int oldIME = enterCriticalSection();
+    dlplay_per_update = per_update;
+    dlplay_ahead = ahead;
+    leaveCriticalSection(oldIME);
 }
 
 bool Wifi_DlPlayBootClient(int aid)

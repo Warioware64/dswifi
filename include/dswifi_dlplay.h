@@ -366,6 +366,21 @@ void Wifi_DlPlaySetBootMode(Wifi_DlPlayBootMode mode);
 ///     true to hold clients, false to release them and begin the transfers.
 void Wifi_DlPlaySetGather(bool gather);
 
+/// Sets how fast the program goes out: how many blocks each Wifi_DlPlayUpdate()
+/// queues (1 to 8; 4 by default), and how many blocks ahead of what the clients
+/// have said they have the host may run before it goes back for what they lack
+/// (Nintendo's MB_SEND_THRESHOLD, 6 by default; up to 256).
+///
+/// The second is what a transfer mostly waits on: a client says what it has
+/// about once a frame, so a window of six blocks caps it at six blocks a round
+/// trip whatever the radio could carry. Clients keep any block they are sent,
+/// in any order, so a wider one costs only blocks sent again when one is lost.
+/// More blocks an update means more frames back to back, which can overrun a
+/// client: raise that one last.
+///
+/// Takes effect from the next update; Wifi_DlPlayStart() does not reset it.
+void Wifi_DlPlaySetPace(int per_update, int ahead);
+
 /// Forces the small (256-byte) command frame for the next session.
 ///
 /// A retail Download Station kiosk always uses the 256-byte frame, not the
