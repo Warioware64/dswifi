@@ -34,7 +34,13 @@ void Wifi_TWL_Update(void)
             // If any other mode has been requested we need to initialize WiFi
             if (WifiData->reqMode != WIFIMODE_DISABLED)
             {
+                // (With interrupts off, as it always ran from one: it talks
+                // to the power chip over I2C and to the clock, which the
+                // program's interrupts use too, and is not to be broken
+                // into halfway -- Wifi_SetUpdateFromLoop.)
+                int oldIME = enterCriticalSection();
                 Wifi_TWL_Start();
+                leaveCriticalSection(oldIME);
                 WifiData->curMode = WIFIMODE_INITIALIZING;
             }
             break;
@@ -54,7 +60,9 @@ void Wifi_TWL_Update(void)
         {
             if (WifiData->reqMode == WIFIMODE_DISABLED)
             {
+                int oldIME = enterCriticalSection();
                 Wifi_TWL_Stop();
+                leaveCriticalSection(oldIME);
                 WifiData->curMode = WIFIMODE_DISABLED;
                 break;
             }
@@ -196,7 +204,8 @@ void Wifi_TWL_Update(void)
             break;
     }
 
-    // TODO: Check if there are RX packets left to send to the ARM9?
+    // The packets the card's interrupt left (it reads only a few at a time).
+    wifi_card_poll();
 
     // Check if we need to transfer anything
     Wifi_TWL_TxArm9QueueFlush();

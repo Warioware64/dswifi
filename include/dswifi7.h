@@ -23,6 +23,26 @@ extern "C" {
 /// It Should be called at a periodic interval, such as in VBlank.
 void Wifi_Update(void);
 
+/// Drive the DSi's wireless (DSi mode) from the program's own loop instead of
+/// from interrupts. Call before the wireless is started.
+///
+/// By default its update runs from a timer every millisecond, from the card's
+/// interrupt and from Wifi_Update, all with interrupts off. A program that is
+/// busy on the ARM7 (its own sound, say) and sends many packets could find one
+/// of them always due again, and nothing else ever ran. With this on, none of
+/// them does it: Wifi_LoopUpdate, called from the program's loop as often as it
+/// can (every couple of milliseconds), reads and sends a few packets each time,
+/// and interrupts go on being taken meanwhile. The DS mode's wireless is not
+/// affected.
+///
+/// @param on
+///     true to drive it from the loop.
+void Wifi_SetUpdateFromLoop(bool on);
+
+/// The DSi's wireless's update, for a program that has called
+/// Wifi_SetUpdateFromLoop(true): call it from its main loop, often.
+void Wifi_LoopUpdate(void);
+
 /// Setup system FIFO handler for WiFi library messages.
 void installWifiFIFO(void);
 

@@ -21,6 +21,9 @@ bool wifi_ndma_wait(void)
     {
         if (!ndmaBusy(WIFI_NDMA_CHAN)) return true;
     }
+    // Given up: the channel stopped, so that the next transfer starts clean
+    // rather than behind one that will never end.
+    REG_NDMA_CR(WIFI_NDMA_CHAN) = 0;
     return false;
 }
 

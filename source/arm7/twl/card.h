@@ -63,6 +63,10 @@ void wifi_card_mbox0_send_packet(u8 type, u8 ack_type, const u8* data, u16 len, 
 u16 wifi_card_mbox0_readpkt(void);
 
 void data_send_pkt_idk(const u8 *pkt_data, u32 len);
+
+// Read a few of the packets the chip has, if it has any (the card's interrupt
+// reads only a few at a time: the rest are read here, from the update).
+void wifi_card_poll(void);
 void data_send_pkt(const u8 *pkt_data, u32 len);
 void data_send_test(const u8* dst_bssid, const u8* src_bssid, u16 idk);
 

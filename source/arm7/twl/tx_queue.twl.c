@@ -16,7 +16,11 @@ void Wifi_TWL_TxArm9QueueFlush(void)
 
     assert((read_idx & 3) == 0);
 
-    while (1)
+    // A few a call: this runs every millisecond (the update timer) with
+    // interrupts off, and a whole queue of a busy game's packets took longer
+    // than that -- the timer was due again before it returned, and nothing
+    // else on the ARM7 ever ran. The rest go next time.
+    for (int sent = 0; sent < 3; sent++)
     {
         // Read packet size
         size_t size = read_u32(txbufData + read_idx);

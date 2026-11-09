@@ -18,6 +18,7 @@
 #include "arm7/twl/rx_queue.h"
 #include "arm7/twl/utils.h"
 #include "arm7/twl/update.h"
+#include "arm7/update.h"
 #include "arm7/twl/ath/wmi.h"
 #include "arm7/twl/ath/bmi.h"
 #include "arm7/twl/ath/htc.h"
@@ -1080,13 +1081,44 @@ static int wifi_card_device_init_bmi(void)
     return wifi_card_wlan_init_bmi();
 }
 
+// Packets read at most per call: the card's interrupt and the update timer run
+// with the ARM7's interrupts off, and the update timer comes every millisecond.
+// Reading all there is while more keep coming (a game sending many a second)
+// held them off for good: no other interrupt, the ARM7's own program stopped.
+// What is left is read by the next call (wifi_card_poll, every update).
+#define WIFI_CARD_PKTS_PER_CALL 4
+
+// Whether the chip has a packet to give (RX FIFO not empty).
+static bool wifi_card_rx_waiting(void)
+{
+    return (wifi_card_read_func1_u8(F1_HOST_INT_STATUS) & 1) != 0;
+}
+
 static void wifi_card_process_pkts(void)
 {
     // Ack the interrupts
     u32 int_sts = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
     wifi_card_write_func1_u32(F1_HOST_INT_STATUS, int_sts);
 
-    while (wifi_card_mbox0_readpkt());
+    // (Asked first: wifi_card_mbox0_readpkt waits a hundred reads for one that
+    // is not there, which every loop like this ended with.)
+    for (int n = 0; n < WIFI_CARD_PKTS_PER_CALL && wifi_card_rx_waiting(); n++)
+    {
+        if (!wifi_card_mbox0_readpkt())
+            break;
+    }
+}
+
+void wifi_card_poll(void)
+{
+    if (!wifi_card_bInitted)
+        return;
+
+    for (int n = 0; n < WIFI_CARD_PKTS_PER_CALL && wifi_card_rx_waiting(); n++)
+    {
+        if (!wifi_card_mbox0_readpkt())
+            break;
+    }
 }
 
 static void wifi_card_irq(void)
@@ -1460,17 +1492,22 @@ static int wifi_card_wlan_init_bmifinish(void)
 
     wifi_card_bInitted = true;
 
-    // Enable IRQs
-    irqSetAUX(IRQ_WIFI_SDIO_CARDIRQ, wifi_card_irq);
-    irqEnableAUX(IRQ_WIFI_SDIO_CARDIRQ);
+    // Enable IRQs (not driven from the program's loop: then the update polls
+    // the card instead -- wifi_card_poll).
+    if (!wifi_update_from_loop)
+    {
+        irqSetAUX(IRQ_WIFI_SDIO_CARDIRQ, wifi_card_irq);
+        irqEnableAUX(IRQ_WIFI_SDIO_CARDIRQ);
+    }
     wifi_sdio_enable_cardirq(true); // MelonDS seems to have trouble with IRQs? Comment out for MelonDS.
 
     wifi_card_write_func1_u32(F1_INT_STATUS_ENABLE, 0x010300D1); // INT_STATUS_ENABLE (or 0x1?)
     wifi_card_write_func0_u8(0x4, 0x3); // CCCR irq_enable, master+func1
 
-    // 100ms timer
-    timerStart(LIBNDS_DEFAULT_TIMER_WIFI, ClockDivider_1024,
-               TIMER_FREQ_1024(1000 / SDIO_TICK_INTERVAL_MS), Wifi_TWL_Update);
+    // 100ms timer (none from the program's loop: Wifi_LoopUpdate)
+    if (!wifi_update_from_loop)
+        timerStart(LIBNDS_DEFAULT_TIMER_WIFI, ClockDivider_1024,
+                   TIMER_FREQ_1024(1000 / SDIO_TICK_INTERVAL_MS), Wifi_TWL_Update);
 
     WLOG_PUTS("T: Waiting for WMI...\n");
     WLOG_FLUSH();

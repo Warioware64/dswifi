@@ -126,8 +126,22 @@ void wifi_sdio_send_command(wifi_sdio_ctx *ctx, wifi_sdio_command cmd, u32 args)
         return;
     }
 
-    // Wait until the SDIO controller is not busy.
-    while (wifi_sdio_read16(WIFI_SDIO_OFFS_IRQ_STAT1) & WIFI_SDIO_STAT1_CMD_BUSY);
+    // Wait until the SDIO controller is not busy. Not for ever: a transfer
+    // left unfinished (a DMA that never ended) would otherwise hang the ARM7
+    // here with interrupts off. Given up, the command fails like a transfer
+    // that times out, and the controller and its DMA are stopped for the next.
+    for (size_t spin = 0; wifi_sdio_read16(WIFI_SDIO_OFFS_IRQ_STAT1) & WIFI_SDIO_STAT1_CMD_BUSY; ++spin)
+    {
+        if (spin >= 64 * 1024)
+        {
+            REG_NDMA_CR(WIFI_NDMA_CHAN) = 0;
+            wifi_sdio_stop();
+            wifi_sdio_write16(WIFI_SDIO_OFFS_IRQ_STAT0, 0);
+            wifi_sdio_write16(WIFI_SDIO_OFFS_IRQ_STAT1, 0);
+            ctx->status |= 4;
+            return;
+        }
+    }
 
     // ACK all interrupts and halt
     wifi_sdio_write16(WIFI_SDIO_OFFS_IRQ_STAT0, 0);
