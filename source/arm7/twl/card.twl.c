@@ -232,11 +232,25 @@ static int wifi_card_write_func1_block(u32 addr, void* buf, u32 len)
             BIT(31) /* write flag */ | (funcnum << 28) | (1 << 27) | (1 << 26) |
             ((addr & 0x1FFFF) << 9) | (blkcnt));
 
+    // A write the DMA never finished: melonDS can't do it at all, so after a
+    // few in a row, every write goes the slow way (a byte at a time). Not
+    // after one: on a console a transfer can stall once, and the slow way
+    // for good made the wireless take all the ARM7's time.
+    static int ndma_timeouts = 0;
     if (!wifi_ndma_wait())
     {
-        WLOG_PUTS("T: NDMA t/o, fallbck to nrml wr\n");
+        WLOG_PUTS("T: NDMA t/o\n");
         WLOG_FLUSH();
-        wlan_ctx.is_melonds = true;
+        if (++ndma_timeouts >= 3)
+        {
+            WLOG_PUTS("T: fallbck to nrml wr\n");
+            WLOG_FLUSH();
+            wlan_ctx.is_melonds = true;
+        }
+    }
+    else
+    {
+        ndma_timeouts = 0;
     }
     wifi_sdio_stop();
 
@@ -1114,9 +1128,15 @@ void wifi_card_poll(void)
     if (!wifi_card_bInitted)
         return;
 
-    for (int n = 0; n < WIFI_CARD_PKTS_PER_CALL && wifi_card_rx_waiting(); n++)
+    // Each read with interrupts off, as each send is (data_send_pkt): from the
+    // program's loop, an interrupt between a command and its DMA left the
+    // transfer waiting until it gave up. Between packets, they are taken.
+    for (int n = 0; n < WIFI_CARD_PKTS_PER_CALL; n++)
     {
-        if (!wifi_card_mbox0_readpkt())
+        int oldIME = enterCriticalSection();
+        bool read = wifi_card_rx_waiting() && wifi_card_mbox0_readpkt();
+        leaveCriticalSection(oldIME);
+        if (!read)
             break;
     }
 }
