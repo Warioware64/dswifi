@@ -67,6 +67,9 @@ void data_send_pkt_idk(const u8 *pkt_data, u32 len);
 // Read a few of the packets the chip has, if it has any (the card's interrupt
 // reads only a few at a time: the rest are read here, from the update).
 void wifi_card_poll(void);
+// Whether the card stopped answering (commands failing in a row): no longer
+// polled or written to, and a connection on it is reported lost.
+bool wifi_card_dead(void);
 void data_send_pkt(const u8 *pkt_data, u32 len);
 void data_send_test(const u8* dst_bssid, const u8* src_bssid, u16 idk);
 

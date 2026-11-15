@@ -26,6 +26,17 @@ void Wifi_TWL_Update(void)
     if ((WifiData->flags7 & WFLAG_ARM7_ACTIVE) == 0)
         return;
 
+    // A card that stopped answering (wifi_card_dead): a connection wanted on
+    // it is lost -- said to the ARM9 as one that could not be kept, not left
+    // to time out with the program held up by every command to it.
+    if (wifi_card_dead() && WifiData->reqMode == WIFIMODE_CONNECTED &&
+        WifiData->curMode != WIFIMODE_CANNOTCONNECT && WifiData->curMode != WIFIMODE_DISABLED)
+    {
+        WifiData->curMode = WIFIMODE_CANNOTCONNECT;
+        WLOG_PUTS("T: Card gone\n");
+        WLOG_FLUSH();
+    }
+
     // check flags, to see if we need to change anything
     switch (WifiData->curMode)
     {
@@ -207,6 +218,7 @@ void Wifi_TWL_Update(void)
     // The packets the card's interrupt left (it reads only a few at a time).
     wifi_card_poll();
 
-    // Check if we need to transfer anything
-    Wifi_TWL_TxArm9QueueFlush();
+    // Check if we need to transfer anything (not to a card that is gone).
+    if (!wifi_card_dead())
+        Wifi_TWL_TxArm9QueueFlush();
 }

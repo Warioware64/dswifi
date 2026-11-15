@@ -43,10 +43,42 @@ static int wifi_card_wlan_init(void);
 #define SDIO_TICK_INTERVAL_MS (1)
 #define MBOX_TMPBUF_SIZE (0x600)
 #define DATA_BUF_LEN (0x600)
+// What a packet read takes, rounded up to the block size: a full-size frame
+// (1500 bytes and its headers) is 0x680, more than the send buffer's size --
+// read into a buffer of that size, it ran past it into the send buffer.
+#define MBOX_RXBUF_SIZE (0x800)
 
 // TODO: Allocate from wifi_card_init()?
 static u8 mbox_out_buffer[MBOX_TMPBUF_SIZE] ALIGN(16);
-static u8 mbox_buffer[MBOX_TMPBUF_SIZE] ALIGN(16);
+static u8 mbox_buffer[MBOX_RXBUF_SIZE] ALIGN(16);
+
+// Commands to the card that failed in a row. A card that stops answering
+// reads as 0xFF -- "a packet is waiting" -- and every command to it waits out
+// its own time limit: polled on, each update took seconds, and the ARM7's
+// program (the game's sound with it) all but stopped ("ARM7 STOPPED, in: wifi
+// update" on a DSi). Past this many, it is taken for gone: not polled or
+// written to again, and a connection on it is reported lost.
+#define WIFI_CARD_GONE_ERRORS 16
+static u32 wifi_card_errors = 0;
+static bool wifi_card_gone = false;
+
+static void wifi_card_note(bool ok)
+{
+    if (ok)
+        wifi_card_errors = 0;
+    else if (++wifi_card_errors >= WIFI_CARD_GONE_ERRORS)
+        wifi_card_gone = true;
+}
+
+bool wifi_card_dead(void)
+{
+    return wifi_card_gone;
+}
+
+// How many times a wait at start-up asks the card before giving up (each ask
+// is a command, some microseconds): with the ARM7's interrupts off, a card
+// that never answered held the console for good.
+#define WIFI_CARD_START_TRIES (200 * 1000)
 
 // Uncomment to send all data bytewise, helpful for debugging.
 //#define SDIO_NO_BLOCKRW // MelonDS needs this uncommented... hangs on wifi_ndma_wait after write
@@ -211,6 +243,7 @@ static int wifi_card_read_func1_block(u32 addr, void* buf, u32 len)
     wifi_sdio_stop();
     wifi_ndma_wait();
 
+    wifi_card_note(!(wlan_ctx.tmio.status & 4));
     if (wlan_ctx.tmio.status & 4)
         return -1;
 
@@ -264,6 +297,7 @@ u8 wifi_card_read_func_byte(u8 func, u32 addr)
 {
     // Read register 0x02 (function enable) hibyte until it's ready
     wifi_card_send_command(cmd52, (func << 28) | (addr & 0x1FFFF) << 9);
+    wifi_card_note(!(wlan_ctx.tmio.status & 4));
     if (wlan_ctx.tmio.status & 4)
         return 0xFF;
 
@@ -471,7 +505,13 @@ static void wifi_card_write_mbox0_u32(u32 val, bool send_irq)
 
 static u32 wifi_card_read_mbox0_u32(void)
 {
-    while (!(wifi_card_read_func1_u8(F1_RX_LOOKAHEAD_VALID) & 1));
+    // (Not for ever: WIFI_CARD_START_TRIES. A reply that never came reads as
+    // whatever is there; the start-up's own checks then fail.)
+    for (u32 tries = 0; !(wifi_card_read_func1_u8(F1_RX_LOOKAHEAD_VALID) & 1); tries++)
+    {
+        if (tries >= WIFI_CARD_START_TRIES)
+            return 0;
+    }
 
     u32 val = 0;
     for (int i = 0; i < 4; i++)
@@ -721,6 +761,9 @@ u16 wifi_card_mbox0_readpkt(void)
     for (; timeout > 0; --timeout)
     {
         u8 sts = wifi_card_read_func1_u8(F1_HOST_INT_STATUS);
+        // (A failed read is no packet: it reads 0xFF, which says there is.)
+        if (wlan_ctx.tmio.status & 4)
+            return 0;
         if (sts & 1) // RX FIFO is not empty
             break;
     }
@@ -766,7 +809,26 @@ u16 wifi_card_mbox0_readpkt(void)
         return 0;
     }
 
-    u16 actual_len = wifi_card_mbox0_readbytes(read_buffer, MBOX_TMPBUF_SIZE, full_len);
+#ifndef SDIO_NO_BLOCKRW
+    // Bigger than the buffer (no frame is): read in pieces the buffer holds,
+    // the last ending where the packet does, and dropped.
+    if (full_len > MBOX_RXBUF_SIZE)
+    {
+        u16 left = full_len;
+        while (left > 0 && !wifi_card_gone)
+        {
+            u16 piece = left > MBOX_RXBUF_SIZE ? MBOX_RXBUF_SIZE : left;
+            if (wifi_card_read_func1_block(0x4000 - left, read_buffer, piece) < 0)
+                break;
+            left -= piece;
+        }
+        WLOG_PRINTF("T: Pkt too big (%u B), dropped", len);
+        WLOG_FLUSH();
+        return 0;
+    }
+#endif
+
+    u16 actual_len = wifi_card_mbox0_readbytes(read_buffer, MBOX_RXBUF_SIZE, full_len);
 
     if (!actual_len)
         return 0;
@@ -1044,6 +1106,9 @@ static void wifi_card_bmi_lz_upload(u32 addr, const u8* data, u32 len)
 // SDIO main functions
 void wifi_card_init(void)
 {
+    wifi_card_errors = 0;
+    wifi_card_gone = false;
+
     wifi_ndma_init();
     wifi_sdio_controller_init();
 
@@ -1105,7 +1170,13 @@ static int wifi_card_device_init_bmi(void)
 // Whether the chip has a packet to give (RX FIFO not empty).
 static bool wifi_card_rx_waiting(void)
 {
-    return (wifi_card_read_func1_u8(F1_HOST_INT_STATUS) & 1) != 0;
+    if (wifi_card_gone)
+        return false;
+    u8 sts = wifi_card_read_func1_u8(F1_HOST_INT_STATUS);
+    // (A failed read is no packet: it reads 0xFF, which says there is.)
+    if (wlan_ctx.tmio.status & 4)
+        return false;
+    return (sts & 1) != 0;
 }
 
 static void wifi_card_process_pkts(void)
@@ -1125,7 +1196,7 @@ static void wifi_card_process_pkts(void)
 
 void wifi_card_poll(void)
 {
-    if (!wifi_card_bInitted)
+    if (!wifi_card_bInitted || wifi_card_gone)
         return;
 
     // Each read with interrupts off, as each send is (data_send_pkt): from the
@@ -1220,10 +1291,15 @@ static int wifi_card_wlan_init_bmi(void)
         // see what operating voltages NWM allows the card to run at.
         //
         // Following that command, the card will be initialized for I/O operations.
-        while (true)
+        // (Each wait not for ever: WIFI_CARD_START_TRIES.)
+        for (u32 tries = 0; ; tries++)
         {
-            while (true)
+            if (tries >= WIFI_CARD_START_TRIES)
+                return -1;
+            for (u32 waits = 0; ; waits++)
             {
+                if (waits >= WIFI_CARD_START_TRIES)
+                    return -1;
                 // CMD5 - IO_SEND_OP_COND
                 wifi_card_send_command(cmd5, ocr);
                 if (ctx->tmio.status & 4)
@@ -1337,11 +1413,13 @@ skip_opcond:
     // if (ctx->tmio.status & 4)
     //     return -1;
 
-    while (true)
+    for (u32 tries = 0; ; tries++)
     {
         // Read register 0x02 (function enable) hibyte until it's ready
         if (wifi_card_read_func0_u8(0x3) == 0x02)
             break;
+        if (tries >= WIFI_CARD_START_TRIES)
+            return -1;
     }
 
     //WLOG_PRINTF("Int status: %x %x",
@@ -1495,11 +1573,15 @@ static int wifi_card_wlan_init_bmifinish(void)
     WLOG_FLUSH();
     wifi_card_bmi_start_firmware();
 
-    while (1)
+    // (Some seconds at most: a firmware that never says it is ready leaves
+    // the card not started, not the console held with interrupts off.)
+    for (u32 tries = 0; ; tries++)
     {
         u32 is_ready = wifi_card_read_intern_word(device_host_interest_addr + 0x58);
         if (is_ready == 1)
             break;
+        if (tries >= 4000)
+            return -1;
 
         ioDelay(0x1000);
     }
