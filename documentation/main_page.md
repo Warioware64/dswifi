@@ -10,7 +10,8 @@ Features:
 - It supports accessing the Internet using IPv4 and IPv6.
 
   - Open networks and WEP-encrypted networks are supported.
-  - In DSi mode, WPA2-encrypted networks are also supported.
+  - In DSi mode, WPA2- and WPA-encrypted networks are also supported, with AES
+    (CCMP) or TKIP.
   - TCP and UDP supported.
 
 - It supports local multiplayer mode:

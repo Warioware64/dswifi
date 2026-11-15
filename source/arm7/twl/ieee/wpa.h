@@ -33,8 +33,20 @@ ptk_keyinfo;
 void wpa_mbedtls_init(void);
 
 void wpa_calc_pmk(const char *ssid, const char *pass, u8 *pmk);
-void wpa_decrypt_gtk(const u8 *kek, const u8 *data, u32 data_len, gtk_keyinfo *out);
-void wpa_calc_mic(const u8 *kck, const u8 *pkt_data, u32 pkt_len, u8 *mic_out);
+// The key descriptor version of an EAPOL-Key frame (its key information's
+// low three bits): what protects it and the key data it carries.
+#define WPA_KEY_VERSION_HMAC_MD5_RC4  1 // TKIP: HMAC-MD5 MIC, RC4 key data
+#define WPA_KEY_VERSION_HMAC_SHA1_AES 2 // CCMP: HMAC-SHA1 MIC, AES key-wrap
+
+// The GTK from an RSN frame's key data (a GTK KDE in it), decrypted as
+// `version` says; `iv` is the frame's EAPOL-Key IV (RC4 needs it).
+void wpa_decrypt_gtk(int version, const u8 *kek, const u8 *iv, const u8 *data, u32 data_len,
+                     gtk_keyinfo *out);
+// The GTK from a WPA1 group key message: the key data is the key itself,
+// `key_len` bytes, with key index `key_idx`.
+void wpa_decrypt_gtk_raw(int version, const u8 *kek, const u8 *iv, const u8 *data, u32 data_len,
+                         u32 key_len, u8 key_idx, gtk_keyinfo *out);
+void wpa_calc_mic(int version, const u8 *kck, const u8 *pkt_data, u32 pkt_len, u8 *mic_out);
 void wpa_calc_ptk(const u8 *dev_mac, const u8 *ap_mac, const u8 *dev_nonce,
                   const u8 *ap_nonce, const u8 *pmk, ptk_keyinfo *ptk);
 

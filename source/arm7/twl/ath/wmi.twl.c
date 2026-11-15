@@ -27,6 +27,21 @@
 
 #define IEEE_AUTH_PSK       (0x000FAC02)
 
+// The same suites in WPA1's own information element (Microsoft's OUI).
+#define WPA1_OUI            (0x0050F200)
+#define WPA1_IE_TYPE        (0x0050F201)
+
+// EAPOL-Key frames: key descriptor types, and key information bits.
+#define EAPOL_KEYDESC_RSN   (2)
+#define EAPOL_KEYDESC_WPA1  (254)
+#define KEYINFO_VERSION     (0x0007)
+#define KEYINFO_PAIRWISE    (0x0008)
+#define KEYINFO_INDEX       (0x0030) // WPA1 group keys
+#define KEYINFO_INSTALL     (0x0040)
+#define KEYINFO_ACK         (0x0080)
+#define KEYINFO_MIC         (0x0100)
+#define KEYINFO_SECURE      (0x0200)
+
 static u8 device_num_channels = 0;
 static u8 device_cur_channel_idx = 0;
 static u16 channel_freqs[32];
@@ -42,6 +57,12 @@ static bool ap_connecting;
 
 static bool has_sent_hs2;
 static bool has_sent_hs4;
+// WPA1 gives the group key in a handshake of its own, after the four-way one:
+// until it has come, no broadcast (DHCP's answers) can be read.
+static bool waiting_group_key;
+// The key descriptor version of the access point's frames (WPA_KEY_VERSION_*):
+// what our replies are protected with.
+static int handshake_version = WPA_KEY_VERSION_HMAC_SHA1_AES;
 
 static u8 device_ap_nonce[32];
 static u8 device_nonce[32];
@@ -59,15 +80,62 @@ static void wmi_set_scan_params(u8 flags, u16 maxact_chdwell_time,
 
 static int wmi_ieee_to_crypt(u32 ieee)
 {
-    switch (ieee)
+    // (The RSN element's suites, 00-0F-AC, and WPA1's, 00-50-F2: the same
+    // numbers after them.)
+    if ((ieee & 0xFFFFFF00) != (IEEE_CRYPT_TKIP & 0xFFFFFF00) && (ieee & 0xFFFFFF00) != WPA1_OUI)
+        return AP_CRYPT_NONE;
+    switch (ieee & 0xFF)
     {
-        case IEEE_CRYPT_TKIP:
+        case IEEE_CRYPT_TKIP & 0xFF:
             return AP_CRYPT_TKIP;
-        case IEEE_CRYPT_AES_CCMP:
+        case IEEE_CRYPT_AES_CCMP & 0xFF:
             return AP_CRYPT_AES;
         default:
             return AP_CRYPT_NONE;
     }
+}
+
+// Whether the access point being joined has a WPA handshake (WPA2 or WPA1).
+static bool wmi_ap_uses_wpa(void)
+{
+    return WifiData->curAp.security_type == AP_SECURITY_WPA2 ||
+           WifiData->curAp.security_type == AP_SECURITY_WPA;
+}
+
+// The suites of an RSN or a WPA1 element, from its version on (the two lay
+// them out alike): its group cipher, the pairwise one to use (AES if it has
+// it), and its key management. False if it is not one this can read.
+static bool wmi_parse_suites(const u8 *p, s32 len, Wifi_ApCryptType *group, Wifi_ApCryptType *pair,
+                             Wifi_ApAuthType *auth)
+{
+    if (len < 2 + 4 || getle16(p) != 0x0001)
+        return false;
+    *group = wmi_ieee_to_crypt(getbe32(p + 2));
+    s32 at = 2 + 4;
+
+    if (at + 2 > len)
+        return true;
+    u16 num_pairwise = getle16(p + at);
+    at += 2;
+    for (int i = 0; i < num_pairwise && at + 4 <= len; i++, at += 4)
+    {
+        Wifi_ApCryptType cipher = wmi_ieee_to_crypt(getbe32(p + at));
+        if (cipher == AP_CRYPT_AES || *pair == AP_CRYPT_NONE)
+            *pair = cipher; // use AES by default if we can
+    }
+
+    if (at + 2 > len)
+        return true;
+    u16 num_authkey = getle16(p + at);
+    at += 2;
+    for (int i = 0; i < num_authkey && at + 4 <= len; i++, at += 4)
+    {
+        u32 key_mgmt = getbe32(p + at);
+        *auth = key_mgmt & 0xFF;
+        if ((key_mgmt & 0xFF) == (IEEE_AUTH_PSK & 0xFF))
+            break;
+    }
+    return true;
 }
 
 void wmi_init(void)
@@ -82,8 +150,8 @@ void wmi_init(void)
 
 bool wmi_is_ap_connected(void)
 {
-    // WPA2 needs to complete its handshake before doing anything else
-    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    // WPA (2 or 1) needs to complete its handshake before doing anything else
+    if (wmi_ap_uses_wpa())
         return ap_connected && wmi_handshake_done();
 
     return ap_connected;
@@ -91,8 +159,8 @@ bool wmi_is_ap_connected(void)
 
 bool wmi_is_ap_connecting(void)
 {
-    // If the WPA2 handshake isn't complete we are still connecting
-    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    // If the WPA handshake isn't complete we are still connecting
+    if (wmi_ap_uses_wpa())
     {
         // If we're connecting to the AP
         if (ap_connecting)
@@ -204,6 +272,7 @@ static void wmi_handle_bss_info(u8 *pkt_data, u32 len_)
     Wifi_ApCryptType group_crypto = AP_CRYPT_NONE;
     Wifi_ApCryptType pair_crypto = AP_CRYPT_NONE;
     Wifi_ApAuthType auth_type = AP_AUTH_NONE;
+    bool rsn_seen = false;
 
     if (wmi_frame_hdr->capability & CAPS_PRIVACY)
         sec_type = AP_SECURITY_WEP;
@@ -224,68 +293,34 @@ static void wmi_handle_bss_info(u8 *pkt_data, u32 len_)
                 memcpy(ap_ssid, &read_ptr[0], ap_ssid_len);
             }
         }
-        else if (id == MGT_FIE_ID_VENDOR) // RSN - Microsoft/Vendor
+        else if (id == MGT_FIE_ID_VENDOR) // WPA1 - Microsoft/Vendor
         {
-            // TODO: Handle RSN here as well
-            //sec_type = AP_SECURITY_WPA2;
+            // WPA1's element (00-50-F2, type 1): WPA, unless the access point
+            // also has an RSN element (WPA2), which is used instead.
+            if (!rsn_seen && len >= 4 + 2 && getbe32(read_ptr) == WPA1_IE_TYPE)
+            {
+                Wifi_ApCryptType wpa_group = AP_CRYPT_NONE, wpa_pair = AP_CRYPT_NONE;
+                Wifi_ApAuthType wpa_auth = AP_AUTH_NONE;
+                if (wmi_parse_suites(read_ptr + 4, len - 4, &wpa_group, &wpa_pair, &wpa_auth))
+                {
+                    sec_type = AP_SECURITY_WPA;
+                    group_crypto = wpa_group;
+                    pair_crypto = wpa_pair;
+                    auth_type = wpa_auth;
+                }
+            }
         }
         else if (id == MGT_FIE_ID_RSN) // RSN
         {
+            // (WPA2, whichever ciphers: TKIP as well as AES.)
             sec_type = AP_SECURITY_WPA2;
-
-            u16 version = getle16(read_ptr);
-
-            if (version != 0x0001)
-            {
-                // WLOG_PRINTF("T: Bad RSN version 0x%x\n", version);
-                // WLOG_FLUSH();
-                goto skip_parse;
-            }
-
-            u32 group_cipher = getbe32(read_ptr + 2);
-            u16 read_idx = 2 + 4;
-            // WLOG_PRINTF("T: AP group cipher 0x%x\n", group_cipher);
-            // WLOG_FLUSH();
-
-            group_crypto = wmi_ieee_to_crypt(group_cipher);
-
-            u16 num_pairwise = getle16(read_ptr + read_idx);
-            read_idx += 2;
-            if (num_pairwise > 4)
-                num_pairwise = 4;
-
-            for (int i = 0; i < num_pairwise; i++)
-            {
-                u32 cipher = getbe32(read_ptr + read_idx + i * 4);
-                //WLOG_PRINTF("AP cipher 0x%x\n", cipher);
-                //WLOG_FLUSH();
-                pair_crypto = wmi_ieee_to_crypt(cipher);
-                if (pair_crypto == AP_CRYPT_AES) // use AES by default if we can
-                    break;
-            }
-            read_idx += 4 * num_pairwise;
-
-            u16 num_authkey = getle16(read_ptr + read_idx);
-            read_idx += 2;
-            if (num_authkey > 4)
-                num_authkey = 4;
-
-            for (int i = 0; i < num_authkey; i++)
-            {
-                u32 auth = getbe32(read_ptr + read_idx + i * 4);
-                // WLOG_PRINTF("T: AP auth %u 0x%x\n", i, auth);
-                // WLOG_FLUSH();
-                auth_type = auth & 0xFF;
-
-                if (auth == IEEE_AUTH_PSK)
-                    break;
-            }
-
-            if (pair_crypto == AP_CRYPT_TKIP)
-                sec_type = AP_SECURITY_WPA;
+            rsn_seen = true;
+            group_crypto = AP_CRYPT_NONE;
+            pair_crypto = AP_CRYPT_NONE;
+            auth_type = AP_AUTH_NONE;
+            wmi_parse_suites(read_ptr, len, &group_crypto, &pair_crypto, &auth_type);
         }
 
-skip_parse:
         data_left -= len;
         read_ptr += len;
     }
@@ -630,7 +665,9 @@ void wmi_connect_cmd(void)
         }
         wmi_params =
         {
-            1, 1, 5, WifiData->curAp.pair_crypt_type, 0,
+            // (Auth mode: 5 WPA2-PSK, 3 WPA-PSK, in the firmware's numbers.)
+            1, 1, WifiData->curAp.security_type == AP_SECURITY_WPA ? 3 : 5,
+            WifiData->curAp.pair_crypt_type, 0,
             WifiData->curAp.group_crypt_type, 0, ssid_len, {0}, mhz, {0},
             DEFAULT_WMI_CONNECT_CTRL_FLAGS
         };
@@ -755,8 +792,11 @@ void wmi_dbgoff(void)
 
 static void wmi_add_cipher_key(u8 idx, u8 usage, const u8 *key, const u8 *rsc)
 {
-    u8 crypt_type = (usage == 1) ?
-                    WifiData->curAp.group_crypt_type : AP_CRYPT_AES /* WPA2, AES */;
+    // (The pairwise key is of the cipher agreed with the access point: AES,
+    // or TKIP, whose 32 bytes are the key and its two MIC keys.)
+    u8 crypt_type = (usage == 1) ? WifiData->curAp.group_crypt_type : WifiData->curAp.pair_crypt_type;
+    if (crypt_type != AP_CRYPT_TKIP && crypt_type != AP_CRYPT_AES)
+        crypt_type = AP_CRYPT_AES;
     u8 crypt_keylen = (crypt_type == AP_CRYPT_TKIP) ? 0x20 : 0x10;
 
     // Figure out the correct keylens for WEP; WEP40 vs WEP104 vs WEP128(?)
@@ -872,7 +912,7 @@ void wmi_connect(void)
 
     ap_connecting = true;
 
-    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    if (wmi_ap_uses_wpa())
     {
         // Check if we have a PMK. If we're connecting to a WFC Access Point
         // this will be set, but it won't be set if the user has given us the
@@ -914,6 +954,8 @@ void wmi_connect(void)
         // Reset WPA handshake state
         has_sent_hs2 = false;
         has_sent_hs4 = false;
+        waiting_group_key = false;
+        handshake_version = WPA_KEY_VERSION_HMAC_SHA1_AES;
     }
 
     wmi_set_bss_filter(4, 0); // current beacon
@@ -957,6 +999,8 @@ bool wmi_is_ready(void)
     return wmi_bIsReady;
 }
 
+// The keys to the chip: the pairwise key `tk` (if not NULL: TK and, for
+// TKIP, the two MIC keys after it) and the group key (if not NULL).
 static void wmi_post_handshake(const u8 *tk, const gtk_keyinfo *gtk_info, const u8 *rsc)
 {
     u8 tmp8 = 1;
@@ -966,13 +1010,17 @@ static void wmi_post_handshake(const u8 *tk, const gtk_keyinfo *gtk_info, const 
     data_send_pkt((u8*)&dummy, sizeof(dummy));
     data_send_pkt((u8*)&dummy, sizeof(dummy));
 
-    if (WifiData->curAp.security_type == AP_SECURITY_WPA2)
+    if (wmi_ap_uses_wpa())
     {
-        wmi_add_cipher_key(0, 0, tk, NULL);
+        if (tk)
+            wmi_add_cipher_key(0, 0, tk, NULL);
 
-        wmi_add_cipher_key(gtk_info->keyidx, 1, gtk_info->key, rsc);
-        WLOG_PRINTF("T: Added GTK 0x%x\n", gtk_info->keyidx);
-        WLOG_FLUSH();
+        if (gtk_info)
+        {
+            wmi_add_cipher_key(gtk_info->keyidx, 1, gtk_info->key, rsc);
+            WLOG_PRINTF("T: Added GTK 0x%x\n", gtk_info->keyidx);
+            WLOG_FLUSH();
+        }
     }
 
     tmp8 = 1;
@@ -986,79 +1034,12 @@ static void wmi_post_handshake(const u8 *tk, const gtk_keyinfo *gtk_info, const 
 // WPA
 //
 
-static void data_send_wpa_handshake2(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt)
-{
-    u8 mic_out[16];
-    struct __attribute__((packed))
-    {
-        u8 idk[2];
-        u8 dst_bssid[6]; // AP MAC
-        u8 src_bssid[6]; // 3DS MAC
-        u8 data_len_be[2];
-        u8 snap_hdr[8];
-
-        u8 version;
-        u8 type;
-        u8 len_be[2];
-        u8 keydesc_type;
-        u8 keyinfo_be[2];
-        u8 keylen_be[2];
-        u8 replay_counter_be[8];
-        u8 wpa_nonce[32];
-        u8 wpa_iv[16];
-        u8 wpa_rsc[8];
-        u8 wpa_key_id[8];
-        u8 wpa_key_mic[16];
-        u8 wpa_keydata_len_be[2];
-        u8 wpa_keydata[0x16];
-        u8 end[];
-    }
-    data_hdr =
-    {
-        { 0x00, 0x1C }, {0}, {0}, {0},
-        { 0xAA, 0xAA, 0x03, 0, 0, 0, 0x88, 0x8E }, // SNAP
-        1, 3, {0}, 2, {0}, {0,0}, {0}, {0}, {0}, {0}, {0}, {0}, {0},
-        {
-            0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac,
-            WifiData->curAp.group_crypt_type == AP_CRYPT_AES ? 0x04 : 0x02, 0x01, 0x00, 0x00,
-            0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00
-        }
-    };
-
-    u16 total_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.idk;
-    u16 data_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.snap_hdr;
-    u16 auth_len = (intptr_t)data_hdr.end - (intptr_t)&data_hdr.keydesc_type;
-
-    memcpy(data_hdr.dst_bssid, dst_bssid, 6);
-    memcpy(data_hdr.src_bssid, src_bssid, 6);
-
-    putbe16(data_hdr.data_len_be, data_len);
-    putbe16(data_hdr.len_be, auth_len);
-    putbe16(data_hdr.keyinfo_be, 0x010A);
-    putbe16(data_hdr.keylen_be, 0);
-    putbe64(data_hdr.replay_counter_be, replay_cnt);
-
-    u8 test_nonce[32];
-    for (size_t i = 0; i < sizeof(test_nonce); i++)
-        test_nonce[i] = Wifi_Random();
-
-    memcpy(data_hdr.wpa_nonce, test_nonce, 32);
-    putbe16(data_hdr.wpa_keydata_len_be, 0x16);
-
-    memcpy(device_nonce, data_hdr.wpa_nonce, 32);
-
-    wpa_calc_ptk(src_bssid, dst_bssid, device_nonce, device_ap_nonce,
-                 (const void *)WifiData->curApSecurity.pmk, &device_ptk);
-
-    wpa_calc_mic(device_ptk.kck, (u8*)&data_hdr.version, auth_len + 4, mic_out);
-    memcpy(data_hdr.wpa_key_mic, mic_out, 16);
-
-    data_send_pkt((u8*)&data_hdr, total_len);
-
-    has_sent_hs2 = true;
-}
-
-static void data_send_wpa_handshake4(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt)
+// An EAPOL-Key frame of ours to the access point: `key_info` (its descriptor
+// version, handshake_version, added here), the key length, the replay
+// counter, our nonce (NULL: none), the key data (NULL: none), and the MIC under
+// the KCK as that version says (HMAC-MD5 for TKIP, HMAC-SHA1 for CCMP).
+static void data_send_eapol_key(const u8 *dst_bssid, const u8 *src_bssid, u16 key_info, u16 key_len,
+                                u64 replay_cnt, const u8 *nonce, const u8 *key_data, u16 key_data_len)
 {
     u8 mic_out[16];
     struct __attribute__((packed))
@@ -1082,90 +1063,106 @@ static void data_send_wpa_handshake4(const u8 *dst_bssid, const u8 *src_bssid, u
         u8 wpa_key_id[8];
         u8 wpa_key_mic[16];
         u8 wpa_keydata_len_be[2];
-        u8 end[];
+        u8 wpa_keydata[32];
     }
     data_hdr =
     {
         { 0x00, 0x1C }, {0}, {0}, {0},
         { 0xAA, 0xAA, 0x03, 0, 0, 0, 0x88, 0x8E }, // SNAP
-        1, 3, {0}, 2, {0}, {0,0},
-        {0}, {0}, {0}, {0}, {0}, {0}, {0}
+        1, 3, {0}, 0, {0}, {0,0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}
     };
 
-    u16 total_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.idk;
-    u16 data_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.snap_hdr;
-    u16 auth_len = (intptr_t)data_hdr.end - (intptr_t)&data_hdr.keydesc_type;
+    if (key_data_len > sizeof(data_hdr.wpa_keydata))
+        key_data_len = sizeof(data_hdr.wpa_keydata);
+
+    const u8 *end = data_hdr.wpa_keydata + key_data_len;
+    u16 total_len = (intptr_t)end - (intptr_t)data_hdr.idk;
+    u16 data_len = (intptr_t)end - (intptr_t)data_hdr.snap_hdr;
+    u16 auth_len = (intptr_t)end - (intptr_t)&data_hdr.keydesc_type;
 
     memcpy(data_hdr.dst_bssid, dst_bssid, 6);
     memcpy(data_hdr.src_bssid, src_bssid, 6);
 
+    data_hdr.keydesc_type = WifiData->curAp.security_type == AP_SECURITY_WPA ? EAPOL_KEYDESC_WPA1
+                                                                             : EAPOL_KEYDESC_RSN;
     putbe16(data_hdr.data_len_be, data_len);
     putbe16(data_hdr.len_be, auth_len);
-    putbe16(data_hdr.keyinfo_be, 0x030A);
-    putbe16(data_hdr.keylen_be, 0);
+    putbe16(data_hdr.keyinfo_be, key_info | handshake_version);
+    putbe16(data_hdr.keylen_be, key_len);
     putbe64(data_hdr.replay_counter_be, replay_cnt);
+    if (nonce)
+        memcpy(data_hdr.wpa_nonce, nonce, 32);
+    putbe16(data_hdr.wpa_keydata_len_be, key_data_len);
+    if (key_data)
+        memcpy(data_hdr.wpa_keydata, key_data, key_data_len);
 
-    putbe16(data_hdr.wpa_keydata_len_be, 0);
-
-    wpa_calc_mic(device_ptk.kck, (u8*)&data_hdr.version, auth_len+4, mic_out);
+    wpa_calc_mic(handshake_version, device_ptk.kck, (u8*)&data_hdr.version, auth_len + 4, mic_out);
     memcpy(data_hdr.wpa_key_mic, mic_out, 16);
 
     data_send_pkt((u8*)&data_hdr, total_len);
+}
+
+// The suite number of a cipher, for our own RSN or WPA1 element.
+static u8 wmi_crypt_to_suite(Wifi_ApCryptType crypt)
+{
+    return crypt == AP_CRYPT_AES ? (IEEE_CRYPT_AES_CCMP & 0xFF) : (IEEE_CRYPT_TKIP & 0xFF);
+}
+
+static void data_send_wpa_handshake2(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt,
+                                     u16 key_len)
+{
+    // Our element, as we asked to join with: the access point's group cipher
+    // and the pairwise one chosen (AES if it has it, else TKIP), PSK.
+    const u8 group = wmi_crypt_to_suite(WifiData->curAp.group_crypt_type);
+    const u8 pair = wmi_crypt_to_suite(WifiData->curAp.pair_crypt_type);
+    const u8 rsn_ie[22] =
+    {
+        0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, group, 0x01, 0x00, 0x00,
+        0x0f, 0xac, pair, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00
+    };
+    const u8 wpa_ie[24] =
+    {
+        0xdd, 0x16, 0x00, 0x50, 0xf2, 0x01, 0x01, 0x00, 0x00, 0x50, 0xf2, group,
+        0x01, 0x00, 0x00, 0x50, 0xf2, pair, 0x01, 0x00, 0x00, 0x50, 0xf2, 0x02
+    };
+    const bool wpa1 = WifiData->curAp.security_type == AP_SECURITY_WPA;
+
+    for (size_t i = 0; i < sizeof(device_nonce); i++)
+        device_nonce[i] = Wifi_Random();
+
+    wpa_calc_ptk(src_bssid, dst_bssid, device_nonce, device_ap_nonce,
+                 (const void *)WifiData->curApSecurity.pmk, &device_ptk);
+
+    // (Key length: none in RSN's; WPA1's says the pairwise key's, as the
+    // access point's did.)
+    data_send_eapol_key(dst_bssid, src_bssid, KEYINFO_PAIRWISE | KEYINFO_MIC, wpa1 ? key_len : 0,
+                        replay_cnt, device_nonce, wpa1 ? wpa_ie : rsn_ie,
+                        wpa1 ? sizeof(wpa_ie) : sizeof(rsn_ie));
+
+    has_sent_hs2 = true;
+}
+
+static void data_send_wpa_handshake4(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt,
+                                     u16 key_len)
+{
+    const bool wpa1 = WifiData->curAp.security_type == AP_SECURITY_WPA;
+    // (RSN's says "secure": the group key came with message 3. WPA1's
+    // comes after, in a handshake of its own.)
+    data_send_eapol_key(dst_bssid, src_bssid,
+                        KEYINFO_PAIRWISE | KEYINFO_MIC | (wpa1 ? 0 : KEYINFO_SECURE),
+                        wpa1 ? key_len : 0, replay_cnt, NULL, NULL, 0);
 
     has_sent_hs4 = true;
 }
 
-static void data_send_wpa_gtkrenew(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt)
+static void data_send_wpa_gtkrenew(const u8 *dst_bssid, const u8 *src_bssid, u64 replay_cnt,
+                                   u16 key_info_in)
 {
-    u8 mic_out[16];
-    struct __attribute__((packed))
-    {
-        u8 idk[2];
-        u8 dst_bssid[6]; // AP MAC
-        u8 src_bssid[6]; // 3DS MAC
-        u8 data_len_be[2];
-        u8 snap_hdr[8];
-
-        u8 version;
-        u8 type;
-        u8 len_be[2];
-        u8 keydesc_type;
-        u8 keyinfo_be[2];
-        u8 keylen_be[2];
-        u8 replay_counter_be[8];
-        u8 wpa_nonce[32];
-        u8 wpa_iv[16];
-        u8 wpa_rsc[8];
-        u8 wpa_key_id[8];
-        u8 wpa_key_mic[16];
-        u8 wpa_keydata_len_be[2];
-        u8 end[];
-    }
-    data_hdr =
-    {
-        { 0x00, 0x1C }, {0}, {0}, {0}, { 0xAA,0xAA,0x03,0,0,0, 0x88, 0x8E },
-        1, 3, {0}, 2, {0}, {0,0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}
-    };
-
-    u16 total_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.idk;
-    u16 data_len = (intptr_t)data_hdr.end - (intptr_t)data_hdr.snap_hdr;
-    u16 auth_len = (intptr_t)data_hdr.end - (intptr_t)&data_hdr.keydesc_type;
-
-    memcpy(data_hdr.dst_bssid, dst_bssid, 6);
-    memcpy(data_hdr.src_bssid, src_bssid, 6);
-
-    putbe16(data_hdr.data_len_be, data_len);
-    putbe16(data_hdr.len_be, auth_len);
-    putbe16(data_hdr.keyinfo_be, 0x0302);
-    putbe16(data_hdr.keylen_be, 0);
-    putbe64(data_hdr.replay_counter_be, replay_cnt);
-
-    putbe16(data_hdr.wpa_keydata_len_be, 0);
-
-    wpa_calc_mic(device_ptk.kck, (u8*)&data_hdr.version, auth_len + 4, mic_out);
-    memcpy(data_hdr.wpa_key_mic, mic_out, 16);
-
-    data_send_pkt((u8*)&data_hdr, total_len);
+    // (WPA1's says which group key, as the access point's did.)
+    const bool wpa1 = WifiData->curAp.security_type == AP_SECURITY_WPA;
+    data_send_eapol_key(dst_bssid, src_bssid,
+                        KEYINFO_MIC | KEYINFO_SECURE | (wpa1 ? (key_info_in & KEYINFO_INDEX) : 0),
+                        0, replay_cnt, NULL, NULL, 0);
 
     has_sent_hs4 = true;
 }
@@ -1201,50 +1198,93 @@ void data_handle_auth(u8 *pkt_data, u32 len, const u8* dev_bssid, const u8 *ap_b
 
     u16 keyinfo = getbe16(auth_hdr->keyinfo_be);
     u16 keydata_len = getbe16(auth_hdr->wpa_keydata_len_be);
+    u16 key_len = getbe16(auth_hdr->keylen_be);
     u64 replay = getbe64(auth_hdr->replay_counter_be);
 
-    // TODO: Use bitmasks instead of constants
-    // TODO: 0x1382, Group Message (1/2)
-    // TODO: WPA?
-    // If not handled, disconnects and reconnects
-
-    if (keyinfo == 0x008A)
+    // Only EAPOL-Key frames of the kind of the access point being joined.
+    if (auth_hdr->type != 3 ||
+        (auth_hdr->keydesc_type != EAPOL_KEYDESC_RSN && auth_hdr->keydesc_type != EAPOL_KEYDESC_WPA1))
     {
-        WLOG_PUTS("T: WPA2 Handshake 1/4\n");
+        WLOG_PRINTF("T: Unk Auth Pkt: type %u\n", auth_hdr->type);
+        WLOG_FLUSH();
+        return;
+    }
+
+    // Read by its bits (TKIP access points send version 1, CCMP ones 2):
+    // the four-way handshake's message 1 (pairwise, ack, no MIC) and 3
+    // (pairwise, ack, MIC), and a group key message (not pairwise).
+    const int version = keyinfo & KEYINFO_VERSION;
+    const bool pairwise = (keyinfo & KEYINFO_PAIRWISE) != 0;
+    const bool ack = (keyinfo & KEYINFO_ACK) != 0;
+    const bool mic = (keyinfo & KEYINFO_MIC) != 0;
+    const bool wpa1 = WifiData->curAp.security_type == AP_SECURITY_WPA;
+
+    if (version != WPA_KEY_VERSION_HMAC_MD5_RC4 && version != WPA_KEY_VERSION_HMAC_SHA1_AES)
+    {
+        WLOG_PRINTF("T: Unk Auth Pkt: 0x%x\n", keyinfo);
+        WLOG_FLUSH();
+        return;
+    }
+
+    if (pairwise && ack && !mic)
+    {
+        WLOG_PRINTF("T: WPA Handshake 1/4 (v%d)\n", version);
         WLOG_FLUSH();
 
+        handshake_version = version;
         memcpy(device_ap_nonce, auth_hdr->wpa_nonce, 32);
 
-        data_send_wpa_handshake2(ap_bssid_, dev_bssid, replay);
-
-        //hexdump(mbox_out_buffer, 0x90);
+        data_send_wpa_handshake2(ap_bssid_, dev_bssid, replay, key_len);
     }
-    else if (keyinfo == 0x13CA)
+    else if (pairwise && ack && mic)
     {
-        WLOG_PUTS("T: WPA2 Handshake 3/4\n");
+        WLOG_PUTS("T: WPA Handshake 3/4\n");
         WLOG_FLUSH();
 
         // TODO verify MIC
         memcpy(device_ap_mic, auth_hdr->wpa_key_mic, 16);
 
         // Send our OK before we actually load keys
-        data_send_wpa_handshake4(ap_bssid_, dev_bssid, replay);
+        data_send_wpa_handshake4(ap_bssid_, dev_bssid, replay, key_len);
 
-        // Decrypt GTK and send AR6014 our generated encryption keys
-        wpa_decrypt_gtk(device_ptk.kek, auth_hdr->body, keydata_len, &device_gtk_keyinfo);
-        wmi_post_handshake(device_ptk.tk, &device_gtk_keyinfo, auth_hdr->wpa_rsc);
+        if (wpa1)
+        {
+            // (Its group key comes next, in a handshake of its own.)
+            waiting_group_key = true;
+            wmi_post_handshake(device_ptk.tk, NULL, NULL);
+        }
+        else
+        {
+            // Decrypt GTK and send AR6014 our generated encryption keys
+            wpa_decrypt_gtk(version, device_ptk.kek, auth_hdr->wpa_iv, auth_hdr->body, keydata_len,
+                            &device_gtk_keyinfo);
+            wmi_post_handshake(device_ptk.tk, &device_gtk_keyinfo, auth_hdr->wpa_rsc);
+        }
     }
-    else if (keyinfo == 0x1382)
+    else if (!pairwise && ack && mic)
     {
         WLOG_PUTS("T: Group message\n");
         WLOG_FLUSH();
 
         // Send our OK before we actually load keys
-        data_send_wpa_gtkrenew(ap_bssid_, dev_bssid, replay);
+        data_send_wpa_gtkrenew(ap_bssid_, dev_bssid, replay, keyinfo);
 
-        // Decrypt GTK and send AR6014 our generated encryption keys
-        wpa_decrypt_gtk(device_ptk.kek, auth_hdr->body, keydata_len, &device_gtk_keyinfo);
-        wmi_post_handshake(device_ptk.tk, &device_gtk_keyinfo, auth_hdr->wpa_rsc);
+        if (wpa1)
+        {
+            // (The key data is the key itself: TKIP's 32 bytes, CCMP's 16.)
+            wpa_decrypt_gtk_raw(version, device_ptk.kek, auth_hdr->wpa_iv, auth_hdr->body,
+                                keydata_len, key_len ? key_len : 32,
+                                (keyinfo & KEYINFO_INDEX) >> 4, &device_gtk_keyinfo);
+            wmi_post_handshake(NULL, &device_gtk_keyinfo, auth_hdr->wpa_rsc);
+            waiting_group_key = false;
+        }
+        else
+        {
+            // Decrypt GTK and send AR6014 our generated encryption keys
+            wpa_decrypt_gtk(version, device_ptk.kek, auth_hdr->wpa_iv, auth_hdr->body, keydata_len,
+                            &device_gtk_keyinfo);
+            wmi_post_handshake(device_ptk.tk, &device_gtk_keyinfo, auth_hdr->wpa_rsc);
+        }
     }
     else
     {
@@ -1258,5 +1298,6 @@ void data_handle_auth(u8 *pkt_data, u32 len, const u8* dev_bssid, const u8 *ap_b
 
 bool wmi_handshake_done(void)
 {
-    return has_sent_hs4;
+    // (WPA1: and its group key come, in the handshake after.)
+    return has_sent_hs4 && !waiting_group_key;
 }

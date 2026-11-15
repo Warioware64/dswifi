@@ -22,13 +22,12 @@ enum wpa_type_t
 {
     WPATYPE_NONE      = 0,
 
-    // TODO: Not supported
+    // (The security used is the access point's own, read from its beacon:
+    // WPA1 or WPA2, AES or TKIP, all handled in DSi mode.)
     WPATYPE_WPA_TKIP  = 4,
 
-    // security=AP_SECURITY_WPA2, auth=AP_AUTH_PSK, group=AP_CRYPT_TKIP, pair=AP_CRYPT_AES
     WPATYPE_WPA2_TKIP = 5,
 
-    // TODO: Not supported
     WPATYPE_WPA_AES   = 6,
 
     // security=AP_SECURITY_WPA2, auth=AP_AUTH_PSK, group=AP_CRYPT_AES, pair=AP_CRYPT_AES

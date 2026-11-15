@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "arm7/twl/ieee/wpa.h"
+#include "arm7/twl/ieee/tkip.h"
 
 #include "mbedtls/md.h"
 #include "mbedtls/memory_buffer_alloc.h"
@@ -106,11 +107,27 @@ void wpa_calc_pmk(const char *ssid, const char *pass, u8 *pmk)
     PBKDF2_HMAC_SHA_1(pass, ssid, 4096, 32, pmk);
 }
 
-void wpa_decrypt_gtk(const u8 *kek, const u8 *data, u32 data_len, gtk_keyinfo *out)
+// The key data of an EAPOL-Key frame, decrypted into `out`: AES key-wrap
+// under the KEK (key descriptor version 2, CCMP), or RC4 under IV || KEK with
+// the first 256 bytes of keystream thrown away (version 1, TKIP). How many
+// bytes came out.
+static size_t wpa_keydata_decrypt(int version, const u8 *kek, const u8 *iv, const u8 *data,
+                                  u32 data_len, u8 *out, size_t out_max)
 {
+    if (version == WPA_KEY_VERSION_HMAC_MD5_RC4)
+    {
+        if (data_len > out_max)
+            data_len = out_max;
+        u8 rc4_key[32];
+        memcpy(rc4_key, iv, 16);
+        memcpy(rc4_key + 16, kek, 16);
+        memcpy(out, data, data_len);
+        tkip_rc4(rc4_key, sizeof(rc4_key), 256, out, data_len);
+        return data_len;
+    }
+
     mbedtls_nist_kw_context kw_ctx;
-    uint8_t gtk_dec[0x200];
-    size_t decrypted_length;
+    size_t decrypted_length = 0;
 
     mbedtls_nist_kw_init(&kw_ctx);
 
@@ -118,24 +135,34 @@ void wpa_decrypt_gtk(const u8 *kek, const u8 *data, u32 data_len, gtk_keyinfo *o
     mbedtls_nist_kw_setkey(&kw_ctx, MBEDTLS_CIPHER_ID_AES, kek, 128, 0);
 
     // Unwrap GTK
-    mbedtls_nist_kw_unwrap(&kw_ctx, MBEDTLS_KW_MODE_KW,
-                           data, data_len,
-                           gtk_dec, &decrypted_length,
-                           0x200);
+    if (mbedtls_nist_kw_unwrap(&kw_ctx, MBEDTLS_KW_MODE_KW, data, data_len, out,
+                               &decrypted_length, out_max) != 0)
+        decrypted_length = 0;
 
     mbedtls_nist_kw_free(&kw_ctx);
+    return decrypted_length;
+}
+
+void wpa_decrypt_gtk(int version, const u8 *kek, const u8 *iv, const u8 *data, u32 data_len,
+                     gtk_keyinfo *out)
+{
+    uint8_t gtk_dec[0x200];
+    size_t decrypted_length = wpa_keydata_decrypt(version, kek, iv, data, data_len, gtk_dec,
+                                                  sizeof(gtk_dec));
 
     memset(out, 0, sizeof(gtk_keyinfo));
 
+    // The GTK KDE (RSN): 0xDD, its size, 00-0F-AC 01, key id, reserved, key.
     size_t i = 0;
-    while (i < decrypted_length)
+    while (i + 2 <= decrypted_length)
     {
         u8 ent_type = gtk_dec[i++];
         u8 ent_size = gtk_dec[i++];
 
         const u8 expected_keytype[4] = {0x00, 0x0f, 0xAC, 0x01};
 
-        if ((ent_type == 0xDD) && !memcmp(&gtk_dec[i], expected_keytype, 4) &&
+        if ((ent_type == 0xDD) && (i + ent_size <= decrypted_length) &&
+            !memcmp(&gtk_dec[i], expected_keytype, 4) &&
             ((ent_size == 0x16) || (ent_size == 0x26)))
         {
             memcpy(out, &gtk_dec[i], ent_size);
@@ -144,8 +171,31 @@ void wpa_decrypt_gtk(const u8 *kek, const u8 *data, u32 data_len, gtk_keyinfo *o
     }
 }
 
-void wpa_calc_mic(const u8 *kck, const u8 *pkt_data, u32 pkt_len, u8 *mic_out)
+void wpa_decrypt_gtk_raw(int version, const u8 *kek, const u8 *iv, const u8 *data, u32 data_len,
+                         u32 key_len, u8 key_idx, gtk_keyinfo *out)
 {
+    // (WPA1's group key message carries the key itself, not in a KDE.)
+    uint8_t gtk_dec[0x40];
+    size_t decrypted_length = wpa_keydata_decrypt(version, kek, iv, data, data_len, gtk_dec,
+                                                  sizeof(gtk_dec));
+
+    memset(out, 0, sizeof(gtk_keyinfo));
+    if (key_len > sizeof(out->key))
+        key_len = sizeof(out->key);
+    if (key_len > decrypted_length)
+        key_len = decrypted_length;
+    out->keyidx = key_idx;
+    memcpy(out->key, gtk_dec, key_len);
+}
+
+void wpa_calc_mic(int version, const u8 *kck, const u8 *pkt_data, u32 pkt_len, u8 *mic_out)
+{
+    if (version == WPA_KEY_VERSION_HMAC_MD5_RC4)
+    {
+        tkip_hmac_md5(kck, 0x10, pkt_data, pkt_len, mic_out);
+        return;
+    }
+
     uint8_t out[20];
     sha1_hmac(kck, 0x10, pkt_data, pkt_len, out);
 

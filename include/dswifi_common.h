@@ -119,7 +119,7 @@ typedef enum
 {
     AP_SECURITY_OPEN, ///< Open AP (no security).
     AP_SECURITY_WEP,  ///< This AP uses WEP encryption.
-    AP_SECURITY_WPA,  ///< This AP uses WPA encryption. Currently unsupported.
+    AP_SECURITY_WPA,  ///< This AP uses WPA encryption (WPA1). Supported in DSi mode.
     AP_SECURITY_WPA2, ///< This AP uses WPA2 encryption.
 }
 Wifi_ApSecurityType;
