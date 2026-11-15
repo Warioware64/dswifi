@@ -159,7 +159,10 @@
 // Sizes of all mailboxes
 #define TCPIP_MBOX_SIZE             10
 #define DEFAULT_RAW_RECVMBOX_SIZE   10
-#define DEFAULT_UDP_RECVMBOX_SIZE   10
+// (A game's datagrams come in bursts: a host's frames, the others' voices.
+// Read once a frame, ten were a burst's worth, and what came after them was
+// dropped. Each queued one is a pointer; its packet is in the heap anyway.)
+#define DEFAULT_UDP_RECVMBOX_SIZE   32
 #define DEFAULT_TCP_RECVMBOX_SIZE   10
 #define DEFAULT_ACCEPTMBOX_SIZE     10
 
