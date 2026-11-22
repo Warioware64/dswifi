@@ -23,8 +23,8 @@ extern "C" {
 /// It Should be called at a periodic interval, such as in VBlank.
 void Wifi_Update(void);
 
-/// Drive the DSi's wireless (DSi mode) from the program's own loop instead of
-/// from interrupts. Call before the wireless is started.
+/// Drive the library from the program's own loop instead of from interrupts
+/// and from libnds's FIFO thread. Call before the wireless is started.
 ///
 /// By default its update runs from a timer every millisecond, from the card's
 /// interrupt and from Wifi_Update, all with interrupts off. A program that is
@@ -32,15 +32,19 @@ void Wifi_Update(void);
 /// of them always due again, and nothing else ever ran. With this on, none of
 /// them does it: Wifi_LoopUpdate, called from the program's loop as often as it
 /// can (every couple of milliseconds), reads and sends a few packets each time,
-/// and interrupts go on being taken meanwhile. The DS mode's wireless is not
-/// affected.
+/// and interrupts go on being taken meanwhile. In both modes, too, the FIFO's
+/// handlers only note what the ARM9 asked for -- the init, the deinit, an
+/// update -- and Wifi_LoopUpdate does it: libnds calls them from a thread whose
+/// stack is too small for any of it. The DS mode's update also runs from the
+/// program's own Wifi_Update calls (its VBlank's), as before.
 ///
 /// @param on
 ///     true to drive it from the loop.
 void Wifi_SetUpdateFromLoop(bool on);
 
-/// The DSi's wireless's update, for a program that has called
-/// Wifi_SetUpdateFromLoop(true): call it from its main loop, often.
+/// The library's update, for a program that has called
+/// Wifi_SetUpdateFromLoop(true): call it from its main loop, often (in both
+/// modes), never from an interrupt.
 void Wifi_LoopUpdate(void);
 
 /// Setup system FIFO handler for WiFi library messages.

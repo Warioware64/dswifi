@@ -7,10 +7,15 @@
 
 #include "arm7/debug.h"
 #include "arm7/ipc.h"
+#include "arm7/setup.h"
 #include "arm7/ntr/update.h"
 #include "arm7/twl/update.h"
 
 bool wifi_update_from_loop = false;
+
+void *volatile wifi_init_due = NULL;
+volatile bool wifi_deinit_due = false;
+volatile bool wifi_sync_due = false;
 
 void Wifi_SetUpdateFromLoop(bool on)
 {
@@ -52,16 +57,43 @@ void Wifi_Update(void)
 
 void Wifi_LoopUpdate(void)
 {
-    if (WifiData == NULL || !wifi_update_from_loop)
+    if (!wifi_update_from_loop)
+        return;
+
+    // What the FIFO's handlers left: an init, then a deinit, then an update.
+    void *init = wifi_init_due;
+    if (init != NULL)
+    {
+        wifi_init_due = NULL;
+        Wifi_Init(init);
+    }
+
+    if (WifiData == NULL)
         return;
 
     if (wifi_update_active)
         return;
 
+    if (wifi_deinit_due)
+    {
+        wifi_deinit_due = false;
+        wifi_sync_due = false;
+        Wifi_Deinit();
+        return;
+    }
+
     wifi_update_active = true;
 
     if (WifiData->reqFlags & WFLAG_REQ_DSI_MODE)
+    {
+        wifi_sync_due = false;
         Wifi_TWL_Update();
+    }
+    else if (wifi_sync_due)
+    {
+        wifi_sync_due = false;
+        Wifi_NTR_Update();
+    }
 
     wifi_update_active = false;
 }
