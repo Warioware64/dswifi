@@ -49,6 +49,43 @@ void dswifi_send_data_to_lwip(void *data, u32 len);
 
 void dswifi_lwip_setup_io_posix(void);
 
+// errno set: by the core when this is the stack built apart (it cannot reach
+// a thread's own storage: include_dsl/lwipopts.h).
+#ifdef DSWIFI_LWIP_DSL
+void dswifi_set_errno(int err);
+#define DSWIFI_ERRNO(e) dswifi_set_errno(e)
+#else
+#define DSWIFI_ERRNO(e) (errno = (e))
+#endif
+
+#if defined(DSWIFI_LWIP_HOOKED) && !defined(DSWIFI_LWIP_DSL)
+
+// The core built without the IP stack (libdswifi_dl9_hook.a): each call into
+// it goes through the table the stack installs (dswifi_lwip.h, lwip_hook.c);
+// with none installed, it is as if the library had no IP stack.
+#include <dswifi_lwip.h>
+
+extern const Wifi_LwipOps *wifi_lwip_ops;
+
+#define wifi_lwip_init()           (wifi_lwip_ops ? wifi_lwip_ops->init() : -1)
+#define wifi_lwip_deinit()         do { if (wifi_lwip_ops) wifi_lwip_ops->deinit(); } while (0)
+#define wifi_lwip_update()         do { if (wifi_lwip_ops) wifi_lwip_ops->update(); } while (0)
+#define wifi_netif_is_up()         (wifi_lwip_ops ? wifi_lwip_ops->netif_is_up() : false)
+#define Wifi_SendPacketToLwip(p, n) do { if (wifi_lwip_ops) wifi_lwip_ops->send_to_lwip((p), (n)); } while (0)
+#define wifi_netif_set_up()        do { if (wifi_lwip_ops) wifi_lwip_ops->netif_set_up(); } while (0)
+#define wifi_using_dhcp()          (wifi_lwip_ops ? wifi_lwip_ops->using_dhcp() : false)
+#define wifi_get_ip()              (wifi_lwip_ops ? wifi_lwip_ops->get_ip() : 0)
+#define wifi_get_dns(i)            (wifi_lwip_ops ? wifi_lwip_ops->get_dns(i) : 0)
+#define wifi_get_ip6(a)            (wifi_lwip_ops ? wifi_lwip_ops->get_ip6(a) : false)
+#define wifi_lwip_set_ip(a, g, m, d1, d2) \
+    do { if (wifi_lwip_ops) wifi_lwip_ops->set_ip((a), (g), (m), (d1), (d2)); } while (0)
+
+#else
+
+#define wifi_lwip_set_ip(a, g, m, d1, d2) Wifi_SetIP((a), (g), (m), (d1), (d2))
+
+#endif
+
 #endif // DSWIFI_ENABLE_LWIP
 
 #endif // LWIP_NDS_H__

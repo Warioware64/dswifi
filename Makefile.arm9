@@ -24,7 +24,22 @@ endif
 # lwIP requirements
 # -----------------
 
-ifeq ($(ENABLE_LWIP),1)
+# LWIP_MODE (this fork's: include/dswifi_lwip.h): "hook", the library with
+# no IP stack in it, reaching one through a table; "dsl", that stack apart
+# (lwIP and its glue only, UDP over IPv4), to be linked into a library loaded
+# at run time: Thumb, every call out by its address (-mlong-calls).
+LWIP_MODE	?=
+
+ifeq ($(LWIP_MODE),hook)
+DEFINES		+= -DDSWIFI_ENABLE_LWIP -DDSWIFI_LWIP_HOOKED
+INCLUDEDIRS	+= lwip/include source/arm9/lwip/include
+EXCLUDE_DIRS	:= source/arm9/lwip
+else ifeq ($(LWIP_MODE),dsl)
+DEFINES		+= -DDSWIFI_ENABLE_LWIP -DDSWIFI_LWIP_HOOKED -DDSWIFI_LWIP_DSL
+SOURCEDIRS	:= lwip/source/api lwip/source/core lwip/source/netif source/arm9/lwip
+INCLUDEDIRS	+= lwip/include source/arm9/lwip/include_dsl source/arm9/lwip/include
+CFLAGS		+= -mlong-calls
+else ifeq ($(ENABLE_LWIP),1)
 DEFINES		+= -DDSWIFI_ENABLE_LWIP
 SOURCEDIRS	+= lwip/source
 INCLUDEDIRS	+= lwip/include source/arm9/lwip/include
@@ -38,7 +53,13 @@ LIBDIRS		:= $(BLOCKSDS)/libs/libnds
 # Build artifacts
 # ---------------
 
-ifeq ($(ENABLE_LWIP),1)
+ifeq ($(LWIP_MODE),hook)
+    NAME		:= libdswifi_dl9_hook
+    BUILDDIR	:= build/release_hook/arm9
+else ifeq ($(LWIP_MODE),dsl)
+    NAME		:= libdswifi_dl9_lwip
+    BUILDDIR	:= build/release_lwip/arm9
+else ifeq ($(ENABLE_LWIP),1)
     ifeq ($(DEBUG),1)
         NAME		:= libdswifi_dl9d
         BUILDDIR	:= build/debug/arm9
@@ -81,7 +102,7 @@ endif
 # ------------
 
 SOURCES_S	:= $(shell find -L $(SOURCEDIRS) -name "*.s")
-SOURCES_C	:= $(shell find -L $(SOURCEDIRS) -name "*.c")
+SOURCES_C	:= $(filter-out $(addsuffix /%,$(EXCLUDE_DIRS)),$(shell find -L $(SOURCEDIRS) -name "*.c"))
 SOURCES_CPP	:= $(shell find -L $(SOURCEDIRS) -name "*.cpp")
 
 # Compiler and linker flags

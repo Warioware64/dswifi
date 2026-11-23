@@ -397,10 +397,10 @@ int Wifi_AssocStatus(void)
 #ifdef DSWIFI_ENABLE_LWIP
                 if (wifi_lwip_enabled)
                 {
-                    Wifi_SetIP(WifiData->wfc[n].ip, WifiData->wfc[n].gateway,
-                               WifiData->wfc[n].subnet_mask,
-                               WifiData->wfc[n].dns_primary,
-                               WifiData->wfc[n].dns_secondary);
+                    wifi_lwip_set_ip(WifiData->wfc[n].ip, WifiData->wfc[n].gateway,
+                                     WifiData->wfc[n].subnet_mask,
+                                     WifiData->wfc[n].dns_primary,
+                                     WifiData->wfc[n].dns_secondary);
                 }
 #endif
                 // Set requested AP settings

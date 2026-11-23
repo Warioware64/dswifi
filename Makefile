@@ -31,6 +31,8 @@ arm9:
 	@+$(MAKE) -f Makefile.arm9 --no-print-directory DEBUG=1
 	@+$(MAKE) -f Makefile.arm9 --no-print-directory ENABLE_LWIP=1
 	@+$(MAKE) -f Makefile.arm9 --no-print-directory ENABLE_LWIP=1 DEBUG=1
+	@+$(MAKE) -f Makefile.arm9 --no-print-directory LWIP_MODE=hook
+	@+$(MAKE) -f Makefile.arm9 --no-print-directory LWIP_MODE=dsl
 
 arm7:
 	@+$(MAKE) -f Makefile.arm7 --no-print-directory

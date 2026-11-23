@@ -29,8 +29,11 @@
 #include "lwip/apps/netbiosns.h"
 #include "lwip/tcpip.h"
 
-// This is set to true if lwIP is enabled
+#ifndef DSWIFI_LWIP_HOOKED
+// This is set to true if lwIP is enabled (with the IP stack apart -- the
+// hooked core and lwip_hook.c -- the core holds it)
 bool wifi_lwip_enabled = false;
+#endif
 
 static struct netif dswifi_netif = { 0 };
 
@@ -152,7 +155,9 @@ void dswifi_send_data_to_lwip(void *data, u32 len)
 err_t dswifi_init_fn(struct netif *netif)
 {
     netif->output = etharp_output; // High level output callbacks
+#if LWIP_IPV6
     netif->output_ip6 = ethip6_output;
+#endif
 
     netif->linkoutput = dswifi_link_output; // Low level output callback
 
@@ -190,13 +195,13 @@ int gethostname(char *name, size_t len)
 {
     if (name == NULL)
     {
-        errno = EINVAL;
+        DSWIFI_ERRNO(EINVAL);
         return -1;
     }
 
     if (len < (strlen(dswifi_netif_hostname) + 1))
     {
-        errno = ENAMETOOLONG;
+        DSWIFI_ERRNO(ENAMETOOLONG);
         return -1;
     }
 
@@ -208,13 +213,13 @@ int sethostname(const char *name, size_t len)
 {
     if (name == NULL)
     {
-        errno = EINVAL;
+        DSWIFI_ERRNO(EINVAL);
         return -1;
     }
 
     if (len > (sizeof(dswifi_netif_hostname) - 1))
     {
-        errno = ENAMETOOLONG;
+        DSWIFI_ERRNO(ENAMETOOLONG);
         return -1;
     }
 
@@ -242,7 +247,9 @@ static void wifi_set_manual_ip(u32 ip_addr, u32 netmask, u32 gw)
         return;
 
     netifapi_dhcp_stop(&dswifi_netif);
+#if LWIP_IPV6_DHCP6
     dhcp6_disable(&dswifi_netif);
+#endif
 
     ip4_addr_t new_ip_addr, new_netmask, new_gateway;
 
@@ -279,11 +286,15 @@ u32 wifi_get_ip(void)
     if (!IP_IS_V4_VAL(dswifi_netif.ip_addr))
         return INADDR_NONE;
 
-    return dswifi_netif.ip_addr.u_addr.ip4.addr;
+    return ip4_addr_get_u32(ip_2_ip4(&dswifi_netif.ip_addr));
 }
 
 bool wifi_get_ip6(struct in6_addr *addr)
 {
+#if !LWIP_IPV6
+    (void)addr;
+    return false;
+#else
     if (!wifi_lwip_enabled)
         return false;
 
@@ -303,6 +314,7 @@ bool wifi_get_ip6(struct in6_addr *addr)
     }
 
     return true;
+#endif
 }
 
 u32 wifi_get_gateway(void)
@@ -313,7 +325,7 @@ u32 wifi_get_gateway(void)
     if (!IP_IS_V4_VAL(dswifi_netif.gw))
         return INADDR_NONE;
 
-    return dswifi_netif.gw.u_addr.ip4.addr;
+    return ip4_addr_get_u32(ip_2_ip4(&dswifi_netif.gw));
 }
 
 u32 wifi_get_netmask(void)
@@ -324,7 +336,7 @@ u32 wifi_get_netmask(void)
     if (!IP_IS_V4_VAL(dswifi_netif.netmask))
         return INADDR_NONE;
 
-    return dswifi_netif.netmask.u_addr.ip4.addr;
+    return ip4_addr_get_u32(ip_2_ip4(&dswifi_netif.netmask));
 }
 
 u32 wifi_get_dns(int index)
@@ -336,7 +348,7 @@ u32 wifi_get_dns(int index)
     if (!IP_IS_V4_VAL(*ip))
         return INADDR_NONE;
 
-    return ip->u_addr.ip4.addr;
+    return ip4_addr_get_u32(ip_2_ip4(ip));
 }
 
 u32 Wifi_GetIP(void)
@@ -404,8 +416,10 @@ int wifi_lwip_init(void)
         return -1;
     }
 
+#if LWIP_IPV6
     // Generate an IPv6 address directly from the MAC address
     netif_create_ip6_linklocal_address(&dswifi_netif, true);
+#endif
 
     netif_set_default(&dswifi_netif);
 
@@ -416,8 +430,10 @@ int wifi_lwip_init(void)
     // Use DHCP by default
     wifi_set_automatic_ip();
 
+#ifndef DSWIFI_LWIP_DSL
     netbiosns_set_name(dswifi_netif.hostname);
     netbiosns_init();
+#endif
 
     dswifi_lwip_setup_io_posix();
 
@@ -450,7 +466,9 @@ void wifi_netif_set_up(void)
     if (dswifi_use_dhcp)
     {
         netifapi_dhcp_start(&dswifi_netif);
+#if LWIP_IPV6_DHCP6
         dhcp6_enable_stateless(&dswifi_netif);
+#endif
     }
 }
 

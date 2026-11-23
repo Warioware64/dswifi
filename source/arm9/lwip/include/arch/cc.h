@@ -42,8 +42,13 @@ typedef uintptr_t   mem_ptr_t;
 #define PACK_STRUCT_BEGIN
 #define PACK_STRUCT_END
 
-// Plaform specific diagnostic output
+// Plaform specific diagnostic output (unless lwipopts.h says otherwise: the
+// stack built apart has none, include_dsl/lwipopts.h)
+#ifndef LWIP_PLATFORM_DIAG
 #define LWIP_PLATFORM_DIAG(x)   printf x
+#endif
+#ifndef LWIP_PLATFORM_ASSERT
 #define LWIP_PLATFORM_ASSERT(x) assert(x)
+#endif
 
 #endif // __ARCH_CC_H__
