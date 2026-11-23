@@ -14,38 +14,42 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
+
 #include <nds/ndstypes.h>
 
 #include <dswifi_version.h>
 
-/// Sync function to ensure data continues to flow between the two CPUs smoothly.
-///
-/// It Should be called at a periodic interval, such as in VBlank.
-void Wifi_Update(void);
+/// Deprecated function with no effect.
+__attribute__((deprecated))
+static inline void Wifi_Update(void)
+{
+}
 
-/// Drive the library from the program's own loop instead of from interrupts
-/// and from libnds's FIFO thread. Call before the wireless is started.
+/// Sets up the library's ARM7 thread, which does all its work: the init, the
+/// updates and the deinit the ARM9 asks for. Call before installWifiFIFO().
 ///
-/// By default its update runs from a timer every millisecond, from the card's
-/// interrupt and from Wifi_Update, all with interrupts off. A program that is
-/// busy on the ARM7 (its own sound, say) and sends many packets could find one
-/// of them always due again, and nothing else ever ran. With this on, none of
-/// them does it: Wifi_LoopUpdate, called from the program's loop as often as it
-/// can (every couple of milliseconds), reads and sends a few packets each time,
-/// and interrupts go on being taken meanwhile. In both modes, too, the FIFO's
-/// handlers only note what the ARM9 asked for -- the init, the deinit, an
-/// update -- and Wifi_LoopUpdate does it: libnds calls them from a thread whose
-/// stack is too small for any of it. The DS mode's update also runs from the
-/// program's own Wifi_Update calls (its VBlank's), as before.
+/// By default the thread has a 4 KB stack from the heap and priority 10, above
+/// main()'s (0). A program whose own loop must not wait for the wireless (its
+/// sound, say) gives it a lower priority than that loop's; the loop must then
+/// yield (cothread_yield_irq(), not swiIntrWait()) for the thread to run.
 ///
-/// @param on
-///     true to drive it from the loop.
-void Wifi_SetUpdateFromLoop(bool on);
+/// @param priority
+///     The thread's priority (-128 to 127, higher first).
+/// @param stack
+///     A stack of the program's own, or NULL for one from the heap.
+/// @param stack_size
+///     Its size in bytes (0: the default).
+void Wifi_SetThreadConfig(int8_t priority, void *stack, size_t stack_size);
 
-/// The library's update, for a program that has called
-/// Wifi_SetUpdateFromLoop(true): call it from its main loop, often (in both
-/// modes), never from an interrupt.
-void Wifi_LoopUpdate(void);
+/// Wakes the library's thread for an update of the DSi's wireless.
+///
+/// In DSi mode the card is polled from the thread, never from a timer or its
+/// interrupt, a few packets each update. The thread updates on each VBlank and
+/// each ARM9 request, but traffic needs it more often: call this from the
+/// program's loop as often as it runs (every couple of milliseconds). In DS
+/// mode it does nothing (that radio's interrupt does its work).
+void Wifi_Poll(void);
 
 /// Setup system FIFO handler for WiFi library messages.
 void installWifiFIFO(void);

@@ -48,7 +48,7 @@ void Wifi_TWL_Update(void)
                 // (With interrupts off, as it always ran from one: it talks
                 // to the power chip over I2C and to the clock, which the
                 // program's interrupts use too, and is not to be broken
-                // into halfway -- Wifi_SetUpdateFromLoop.)
+                // into halfway, by a thread or an interrupt.)
                 int oldIME = enterCriticalSection();
                 Wifi_TWL_Start();
                 leaveCriticalSection(oldIME);

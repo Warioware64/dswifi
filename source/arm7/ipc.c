@@ -7,24 +7,15 @@
 
 #include "arm7/ipc.h"
 #include "arm7/setup.h"
-#include "arm7/update.h"
 
 volatile Wifi_MainStruct *WifiData = NULL;
 
-// With the program's loop driving the library (Wifi_SetUpdateFromLoop), the
-// handlers only say what is due and Wifi_LoopUpdate does it: libnds calls
-// them from its FIFO thread, whose stack (1 KB) holds neither Wifi_Init nor
-// Wifi_Update with an interrupt on top, and from which a deinit could cut into
-// an update half done. Otherwise, as ever, here.
+// libnds calls these from its FIFO thread, whose stack (1 KB) holds none of the
+// library's work: they only ask the library's thread for it and wake it
+// (setup.c).
 static void wifiAddressHandler(void *address, void *userdata)
 {
     (void)userdata;
-
-    if (wifi_update_from_loop)
-    {
-        wifi_init_due = address;
-        return;
-    }
 
     Wifi_Init(address);
 }
@@ -36,17 +27,12 @@ static void wifiValue32Handler(u32 value, void *data)
     switch (value)
     {
         case WIFI_SYNC:
-            if (wifi_update_from_loop)
-                wifi_sync_due = true;
-            else
-                Wifi_Update();
+            cothread_send_signal(DSWIFI_ARM7_SIGNAL);
             break;
 
         case WIFI_DEINIT:
-            if (wifi_update_from_loop)
-                wifi_deinit_due = true;
-            else
-                Wifi_Deinit();
+            Wifi_Request_Deinit();
+            cothread_send_signal(DSWIFI_ARM7_SIGNAL);
             break;
 
         default:
