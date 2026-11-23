@@ -1095,6 +1095,47 @@ const void *Wifi_RxRawReadPacketPointer(u32 address);
 
 /// @}
 
+/// @defgroup dswifi9_wfc_read The console's saved connections (this fork's)
+/// @{
+
+/// What a console's saved connection is protected by.
+typedef enum {
+    WFC_SECURITY_OPEN = 0, ///< Nothing.
+    WFC_SECURITY_WEP = 1,  ///< WEP: the key's bytes in `key`, `wep_mode` its size.
+    WFC_SECURITY_WPA = 2,  ///< WPA or WPA2 (a DSi's slots 4 to 6): the passphrase in `key`.
+} Wifi_WfcSecurity;
+
+/// One of the console's saved connections, as its settings show it.
+typedef struct {
+    u8 slot;            ///< 1 to 3 (a DS's and a DSi's), 4 to 6 (a DSi's own).
+    u8 security;        ///< Wifi_WfcSecurity.
+    u8 wep_mode;        ///< enum WEPMODES, for WEP.
+    u8 ssid_len;
+    char ssid[33];      ///< Zero-terminated.
+    u8 key_len;         ///< Bytes in `key`: a WEP key's, or the passphrase's.
+    u8 key[64];
+    u32 ip;             ///< 0: given by the network (DHCP). Network byte order,
+    u32 gateway;        ///< as Wifi_SetIP() takes them.
+    u32 subnet_mask;
+    u32 dns1;
+    u32 dns2;
+} Wifi_WfcSlot;
+
+/// Reads the console's saved connections from its firmware: a DS's three, a
+/// DSi's six. The wireless need not be started (nor is it). Slots never set,
+/// or whose data does not check, are left out.
+///
+/// @param slots
+///     Where to put them, in the settings' order.
+/// @param most
+///     How many `slots` holds (6 for every one).
+///
+/// @return
+///     How many were read.
+int Wifi_ReadWfcSlots(Wifi_WfcSlot *slots, int most);
+
+/// @}
+
 #ifdef __cplusplus
 }
 #endif
