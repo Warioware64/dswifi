@@ -13,6 +13,14 @@
 #include "arm9/lwip/lwip_nds.h"
 #include "arm9/wifi_arm9.h"
 
+// The signal a semaphore is woken by, as libnds makes it (its cosema code
+// sets bit 31 of the semaphore's address). libnds no longer offers this
+// helper in its headers.
+static inline uint32_t wifi_cosema_signal_id(cosema_t *sema)
+{
+    return BIT(31) | (uintptr_t)sema;
+}
+
 static volatile uint32_t wifi_sys_ms_counter;
 
 void sys_msleep(u32_t ms)
@@ -402,7 +410,7 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
             // Sleep until the semaphore is available, or until the next timer
             // tick so that we can check for timeouts.
             cothread_yield_irq_or_signal(IRQ_TIMER(LIBNDS_DEFAULT_TIMER_WIFI),
-                                         cosema_to_signal_id(sem));
+                                         wifi_cosema_signal_id(sem));
         }
     }
 
